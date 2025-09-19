@@ -16,7 +16,6 @@ interface SpreadsheetProps {
   setData: Dispatch<SetStateAction<SpreadsheetData>>;
   setToast: Dispatch<SetStateAction<ToastDetail>>;
   apiKey: string;
-  checkApiKey: () => boolean | 0 | undefined;
 }
 
 // Add API URL from environment
@@ -27,7 +26,6 @@ const Spreadsheet: React.FC<SpreadsheetProps> = ({
   data,
   setData,
   apiKey,
-  checkApiKey,
 }) => {
   const [activeCell, setActiveCell] = useState<Position | null>(null);
   const [editValue, setEditValue] = useState("");
@@ -115,7 +113,7 @@ const Spreadsheet: React.FC<SpreadsheetProps> = ({
     }
   };
 
-  // Enrichment function that calls our API
+  // Enrichment function that calls our streaming API
   const enrichColumn = async (colIndex: number) => {
     if (!data.headers[colIndex]) {
       setToast({
@@ -135,14 +133,6 @@ const Spreadsheet: React.FC<SpreadsheetProps> = ({
       return;
     }
 
-    if (!checkApiKey()) {
-      setToast({
-        message: "Please set a valid API Key",
-        type: "error",
-        isShowing: true,
-      });
-      return;
-    }
     // Set all cells in the column to loading state at once
     const newRows = data.rows.map((row) => {
       const newRow = [...row];
@@ -154,68 +144,162 @@ const Spreadsheet: React.FC<SpreadsheetProps> = ({
     setData({ ...data, rows: newRows });
 
     try {
-      // Get context from other columns
-      const contextValues: Record<string, string> = {};
-      data.headers.forEach((header, idx) => {
-        if (idx !== colIndex && header.trim() !== "") {
-          contextValues[header] = data.rows[0][idx].value;
-        }
-      });
+      // Prepare surgeons data with context from other columns
+      const surgeons = data.rows
+        .filter(row => row[0].value?.length) // Only include rows with names
+        .map((row) => {
+          const surgeon: any = { name: row[0].value };
+          
+          // Add context from other columns
+          data.headers.forEach((header, idx) => {
+            if (idx !== 0 && idx !== colIndex && header.trim() !== "") {
+              const headerKey = header.toLowerCase().replace(/\s+/g, '_');
+              if (row[idx]?.value) {
+                surgeon[headerKey] = row[idx].value;
+              }
+            }
+          });
+          
+          return surgeon;
+        });
 
-      // Extract all target values from first column
-      const targetValues = data.rows.map((row) => row[0].value);
+      const targetFields = [data.headers[colIndex]]; // Single field enrichment
 
-      // Make a single batch request
-      const response = await fetch(`${API_URL}/api/enrich/batch`, {
-        method: "POST",
+      // Use fetch with streaming instead of EventSource since we need POST
+      const response = await fetch(`${API_URL}/api/enrich-medical/stream`, {
+        method: 'POST',
         headers: {
-          "Content-Type": "application/json",
-          Authorization: apiKey,
+          'Content-Type': 'application/json',
+          'Authorization': apiKey ? `Bearer ${apiKey}` : '',
         },
         body: JSON.stringify({
-          column_name: data.headers[colIndex],
-          rows: targetValues,
-          context_values: contextValues,
-        }),
+          surgeons,
+          target_fields: targetFields,
+          provider: 'vertex'
+        })
       });
 
       if (!response.ok) {
-        setToast({
-          message: "Enrichment failed",
-          type: "error",
-          isShowing: true,
-        });
-        throw new Error("Batch enrichment failed");
+        throw new Error(`HTTP ${response.status}: ${response.statusText}`);
       }
 
-      const result = await response.json();
+      const reader = response.body?.getReader();
+      if (!reader) {
+        throw new Error('Failed to get response reader');
+      }
 
-      // Update all cells at once with the enriched values
-      const enrichedRows = data.rows.map((row, rowIndex) => {
-        const newRow = [...row];
-        newRow[colIndex] = {
-          value: result.enriched_values[rowIndex],
-          sources: result.sources[rowIndex],
-          enriched: result.enriched_values[rowIndex] !== "",
-          loading: false,
-        };
-        return newRow;
-      });
+      let processedCount = 0;
+      const totalCount = surgeons.length;
+      let buffer = '';
 
-      setData({ ...data, rows: enrichedRows });
-      setToast({ message: "Cells enriched", type: "success", isShowing: true });
+      // Process the stream
+      try {
+        while (true) {
+          const { done, value } = await reader.read();
+          
+          if (done) break;
+
+          // Convert bytes to text and add to buffer
+          const chunk = new TextDecoder().decode(value, { stream: true });
+          buffer += chunk;
+
+          // Process complete SSE messages in buffer
+          let lines = buffer.split('\n');
+          buffer = lines.pop() || ''; // Keep incomplete line in buffer
+
+          for (const line of lines) {
+            if (line.startsWith('data: ')) {
+              try {
+                const eventData = JSON.parse(line.slice(6)); // Remove 'data: ' prefix
+                
+                switch (eventData.type) {
+                  case 'connected':
+                    setToast({
+                      message: "Starting enrichment...",
+                      type: "info",
+                      isShowing: true,
+                    });
+                    break;
+                    
+                  case 'field_complete':
+                    // Update the specific cell immediately
+                    const surgeonIdx = eventData.surgeon_idx;
+                    const value = eventData.value || "";
+                    const sources = eventData.sources || [];
+                    
+                    setData(prevData => {
+                      const updatedRows = [...prevData.rows];
+                      if (updatedRows[surgeonIdx]) {
+                        updatedRows[surgeonIdx][colIndex] = {
+                          value: value,
+                          sources: sources,
+                          enriched: value !== "" && value !== "Information not found",
+                          loading: false,
+                        };
+                      }
+                      return { ...prevData, rows: updatedRows };
+                    });
+                    
+                    processedCount++;
+                    
+                    // Show progress
+                    if (processedCount % 10 === 0 || processedCount === totalCount) {
+                      setToast({
+                        message: `Enriched ${processedCount}/${totalCount} cells...`,
+                        type: "info",
+                        isShowing: true,
+                      });
+                    }
+                    break;
+                    
+                  case 'field_error':
+                    // Handle individual field errors
+                    const errorSurgeonIdx = eventData.surgeon_idx;
+                    setData(prevData => {
+                      const updatedRows = [...prevData.rows];
+                      if (updatedRows[errorSurgeonIdx]) {
+                        updatedRows[errorSurgeonIdx][colIndex] = {
+                          value: "Error during enrichment",
+                          sources: [],
+                          enriched: false,
+                          loading: false,
+                        };
+                      }
+                      return { ...prevData, rows: updatedRows };
+                    });
+                    break;
+                    
+                  case 'complete':
+                    setToast({
+                      message: `Enrichment completed! Processed ${processedCount} cells`,
+                      type: "success",
+                      isShowing: true,
+                    });
+                    return; // Exit the processing loop
+                }
+              } catch (error) {
+                console.error("Error parsing streaming data:", error);
+              }
+            }
+          }
+        }
+      } catch (streamError) {
+        console.error("Error reading stream:", streamError);
+        throw streamError;
+      } finally {
+        reader.releaseLock();
+      }
+
     } catch (error) {
       console.error("Error during enrichment:", error);
       // Reset loading state on error for all cells at once
       const errorRows = data.rows.map((row) => {
         const newRow = [...row];
-
         newRow[colIndex] = {
           ...newRow[colIndex],
           enriched: false,
           loading: false,
         };
-
         return newRow;
       });
       setData({ ...data, rows: errorRows });
@@ -243,15 +327,6 @@ const Spreadsheet: React.FC<SpreadsheetProps> = ({
     if (!data.rows.map((row) => row[0]).some((cell) => cell?.value?.length)) {
       setToast({
         message: "Please specify a key in the first column",
-        type: "error",
-        isShowing: true,
-      });
-      return;
-    }
-
-    if (!checkApiKey()) {
-      setToast({
-        message: "Please set a valid API Key",
         type: "error",
         isShowing: true,
       });
@@ -301,13 +376,20 @@ const Spreadsheet: React.FC<SpreadsheetProps> = ({
         method: "POST",
         headers: {
           "Content-Type": "application/json",
-          Authorization: apiKey,
+          ...(apiKey && { "Authorization": `Bearer ${apiKey}` }),
         },
         body: JSON.stringify({ data: requestData }),
       });
 
       if (!response.ok) {
-        throw new Error("Table enrichment failed");
+        let errorMessage = "Table enrichment failed";
+        try {
+          const errorData = await response.json();
+          errorMessage = errorData.detail || errorData.message || errorMessage;
+        } catch (e) {
+          // Use default message if JSON parsing fails
+        }
+        throw new Error(errorMessage);
       }
 
       const result = await response.json();
@@ -339,7 +421,7 @@ const Spreadsheet: React.FC<SpreadsheetProps> = ({
 
       setData({ ...data, rows: errorRows });
       setToast({
-        message: "Table enrichment failed",
+        message: error instanceof Error ? error.message : "Table enrichment failed",
         type: "error",
         isShowing: true,
       });
@@ -394,10 +476,10 @@ const Spreadsheet: React.FC<SpreadsheetProps> = ({
       animate={{ opacity: 1, y: 0 }}
       transition={{ duration: 0.5 }}
     >
-      <div className="w-full">
+      <div className="w-full overflow-x-auto overflow-y-visible">
         <table
           ref={tableRef}
-          className="w-full border-separate border-spacing-0"
+          className="min-w-full border-separate border-spacing-0"
         >
           <thead>
             <tr>
@@ -410,17 +492,18 @@ const Spreadsheet: React.FC<SpreadsheetProps> = ({
                 </div>
               </th>
               {data.headers.map((header, index) => (
-                <th
+                                <th
                   key={index}
-                  className={`w-40 max-w-[150px] bg-white border border-gray-200 p-2 text-left relative h-12 ${
-                    index === data.headers.length - 1 &&
-                    data.headers.length === 5
-                      ? "last-header"
+                  className={`w-56 max-w-[220px] bg-white border border-gray-200 p-2 text-left relative h-12 ${
+                    editingHeader === index
+                      ? "z-30"
+                      : index === 0
+                      ? "sticky left-14 z-10"
                       : ""
                   }`}
                 >
                   <div className="flex justify-between items-center group">
-                    <div className="flex items-center w-full">
+                    <div className="flex items-center flex-1 min-w-0 mr-2">
                       {editingHeader === index ? (
                         <input
                           ref={headerInputRef}
@@ -434,14 +517,14 @@ const Spreadsheet: React.FC<SpreadsheetProps> = ({
                         />
                       ) : (
                         <div
-                          className="flex items-center max-w-[140px]"
+                          className="flex items-center min-w-0 flex-1"
                           onClick={() => startEditingHeader(index)}
                         >
-                          <span className="font-medium overflow-hidden text-ellipsis whitespace-nowrap">
+                          <span className="font-medium overflow-hidden text-ellipsis whitespace-nowrap flex-1">
                             {header}
                           </span>
                           <button
-                            className="ml-2 text-gray-400 hover:text-blue-500 p-1 rounded-full hover:bg-blue-50 transition-colors"
+                            className="ml-2 text-gray-400 hover:text-blue-500 p-1 rounded-full hover:bg-blue-50 transition-colors flex-shrink-0"
                             title="Edit column name"
                           >
                             <Pencil size={14} />
@@ -450,7 +533,7 @@ const Spreadsheet: React.FC<SpreadsheetProps> = ({
                       )}
                     </div>
                     {index !== 0 && (
-                      <div className="flex space-x-1 opacity-0 group-hover:opacity-100 transition-opacity">
+                      <div className="flex space-x-1 flex-shrink-0">
                         <button
                           className="text-red-500 hover:text-red-700 p-1 rounded-full hover:bg-red-50"
                           onClick={() => deleteColumn(index)}

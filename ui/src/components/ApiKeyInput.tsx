@@ -9,17 +9,42 @@ import {
 import React, { useState } from "react";
 import { motion } from "framer-motion";
 
-const ApiKeyInput: React.FC<any> = ({
-  glassStyle,
+interface ApiKeyInputProps {
+  glassStyle?: string;
+  apiKey: string;
+  setApiKey?: (key: string) => void;
+  onApiKeyChange?: (key: string) => void;
+  isOpen?: boolean;
+  setIsOpen?: (open: boolean) => void;
+  checkApiKey?: () => boolean;
+}
+
+const ApiKeyInput: React.FC<ApiKeyInputProps> = ({
+  glassStyle = "",
   apiKey,
   setApiKey,
-  isOpen,
+  onApiKeyChange,
+  isOpen = true,
   setIsOpen,
   checkApiKey,
 }) => {
   // Toggle function to open or close the form
-  const toggleAccordion = () => setIsOpen(!isOpen);
+  const toggleAccordion = () => setIsOpen?.(!(isOpen));
   const [showKey, setShowKey] = useState(false);
+
+  // Handle API key changes with fallback
+  const handleApiKeyChange = (value: string) => {
+    setApiKey?.(value);
+    onApiKeyChange?.(value);
+  };
+
+  // Check if API key is valid (fallback to checking if it's not empty)
+  const isApiKeyValid = () => {
+    if (checkApiKey) {
+      return checkApiKey();
+    }
+    return apiKey && apiKey.trim().length > 0;
+  };
 
   return (
     <motion.div
@@ -43,7 +68,7 @@ const ApiKeyInput: React.FC<any> = ({
             <span className="text-xs font-medium text-gray-500 px-2 py-1 bg-gray-100 rounded-md mt-0.5">
               required
             </span>
-            {checkApiKey() && (
+            {isApiKeyValid() && (
               <CheckCircle2 className="h-5 w-5 mt-0.5 text-[#22C55E]" />
             )}
           </div>
@@ -68,7 +93,7 @@ const ApiKeyInput: React.FC<any> = ({
                   type={showKey ? "text" : "password"}
                   value={apiKey}
                   spellCheck="false"
-                  onChange={(e) => setApiKey(e.target.value)}
+                  onChange={(e) => handleApiKeyChange(e.target.value)}
                   className={`backdrop-filter backdrop-blur-lg bg-white/80 border border-gray-200 shadow-xl pl-10 w-full rounded-lg py-3 px-4 text-gray-900 focus:border-[#468BFF]/50 focus:outline-none focus:ring-1 focus:ring-[#468BFF]/50 placeholder-gray-400 bg-white/80 shadow-none transition-all duration-300 focus:border-[#468BFF]/50 focus:ring-1 focus:ring-[#468BFF]/50 group-hover:border-[#468BFF]/30 bg-white/80 backdrop-blur-sm text-lg py-4 pl-12 pr-12 font-['DM_Sans']`}
                   placeholder="Enter Tavily API Key"
                 />

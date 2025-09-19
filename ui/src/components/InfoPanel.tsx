@@ -45,8 +45,8 @@ const InfoPanel: React.FC<InfoPanelProps> = ({ glassStyle, onDismiss }) => {
       title: "About This Demo",
       content: (
         <p className="text-gray-600 text-sm leading-relaxed">
-          This demo showcases how Tavily's AI can automatically enrich your
-          spreadsheet data with real-time information.
+          This demo showcases how Sylke's AI can automatically enrich your
+          spreadsheet data with real-time surgeon information.
         </p>
       ),
     },
