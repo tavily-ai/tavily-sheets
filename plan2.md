@@ -1,81 +1,70 @@
-# Revised Improvement Plan for Surgeon Data Enrichment App
+# Analysis and Refactoring Plan
 
 ## 1. Executive Summary
 
-Thank you for the clarification. This revised plan aligns with the goal of creating a best-in-class **specialized tool for surgeon data enrichment**.
+The current codebase is functional but suffers from three core issues:
+- **Codebase Inflation:** Redundant API endpoints and duplicated logic between the frontend and backend make the system larger and harder to maintain.
+- **Hardcoded Logic:** Extensive hardcoding, especially in the backend enrichment pipeline, limits the system's "agentic" potential. It follows rigid, predefined rules instead of dynamically planning and adapting.
+- **Inconsistent UX:** The user experience for enriching a single column (streaming) is vastly different from enriching a whole table (blocking), which can be confusing and frustrating.
 
-The core data model (`MedicalEnrichmentContext`) is appropriate for this domain. The key issues are not with the model itself, but with its **execution**. The current process feels "rigid" because its search and extraction strategies are too simplistic and fail on complex cases. The "agentic" quality is missing because the system doesn't intelligently adapt its strategy based on the available data for a given surgeon.
+This plan outlines a series of refactoring steps to address these flaws, aiming to create a leaner, more intelligent, and more user-friendly application.
 
-The top priorities are fixing the **critical extraction failures** (email, LinkedIn) and making the enrichment process **smarter and more accurate** within its specialized domain.
+## 2. Flaw: Codebase Inflation and Redundancy
 
----
+**Analysis:** The backend has multiple sets of enrichment endpoints (`/api/enrich` vs. `/api/enrich-medical`), and the frontend duplicates logic that exists on the backend (field name canonicalization). This increases complexity and maintenance overhead.
 
-## 2. Enhancing the Enrichment Pipeline's Intelligence
+**Instructions for Remediation:**
 
-**Problem:** The current pipeline follows a fixed script. It struggles when input data is incomplete (e.g., a missing hospital name) and its search queries are not optimized for the nuances of finding surgeon information.
+1.  **Consolidate API Endpoints:**
+    - Deprecate and remove the older, generic endpoints: `/api/enrich`, `/api/enrich/batch`, and `/api/enrich-table` from `app.py`.
+    - The `enrich-medical` endpoints are more specialized and feature-rich (e.g., streaming) and should be the single source of truth for enrichment.
 
-**Proposed Solution: Implement a More Dynamic "Understand -> Search" Flow.**
+2.  **Unify Frontend Enrichment Logic:**
+    - In `ui/src/components/Spreadsheet.tsx`, modify the `enrichTable` function. Instead of calling the now-deprecated `/api/enrich-table`, it should iterate through the columns that need enrichment and call the existing `enrichColumn` function for each. This will reuse the streaming API and provide a consistent UX.
 
-1.  **Phase 1: Understand the Full Context**
-    *   Before searching, use a powerful LLM to analyze all available data for a given surgeon (name, known address, specialty, etc.) and the specific field to be enriched.
-    *   **LLM Task:** Generate a clear, one-sentence "intent" that captures the specific goal.
-    *   **Example:**
-        *   **Row Data:** `{'Name': 'Dr. John Carter', 'Location': 'Chicago, IL'}`
-        *   **Target Column:** `"Specialty"`
-        *   **Generated Intent:** `"Find the medical specialty of Dr. John Carter, who is based in Chicago."`
+3.  **Remove Frontend Redundancy:**
+    - In `ui/src/components/Spreadsheet.tsx`, remove the `canonicalizeField` utility function. The backend already performs this normalization. The frontend should send the raw column header, simplifying the client-side code.
 
-2.  **Phase 2: Generate Smarter, Context-Aware Queries**
-    *   Use the generated "intent" to create much higher-quality search queries.
-    *   **LLM Task:** `"Based on the intent to '${intent}', generate 2-3 optimal search queries for finding information about a medical professional."`
-    *   **Benefit:** This makes the agent more adaptive. If a hospital name is missing, the queries will naturally focus on other available data, like location or known specialty, making the process more resilient and successful.
+4.  **Refactor Backend Batch Processing:**
+    - In `app.py`, the `SequentialBatchProcessor` class and the custom batching logic within `StreamingMedicalEnricher` are redundant. Refactor them into a single, robust batch processing utility that can be used by both the batch and streaming endpoints to handle rate limiting and concurrency.
 
----
+## 3. Flaw: Hardcoded Logic and Lack of "Agentic" Feel
 
-## 3. Fixing Critical Extraction Failures (Email & LinkedIn)
+**Analysis:** The core enrichment logic in `backend/graph.py` is powerful but constrained by hardcoded prompts, search configurations, and a rigid, linear execution graph. This prevents the system from reasoning about its tasks and adapting its strategy.
 
-**Problem:** The `smart_extractor.py` module is the direct cause of poor results. It uses naive regular expressions and fails to use the rich context from search results to validate its findings.
+**Instructions for Remediation:**
 
-**Proposed Solution: Replace Regex with LLM-Powered, Context-Aware Extraction.**
+1.  **Introduce Dynamic Field Profiles:**
+    - In the backend, create a configuration system (e.g., a `config/` directory with YAML or JSON files) to define "Field Profiles".
+    - Replace the hardcoded dictionaries `_get_field_specific_guidance` and `_get_search_config` in `backend/graph.py`. Each field profile should define its own search strategy, prompt guidance, and model complexity.
+    - **Example `email.yaml`:**
+      ```yaml
+      field_name: email
+      search_depth: advanced
+      complexity: simple
+      prompt_guidance: "You are an expert at finding professional contact information..."
+      ```
+    - This makes the system's knowledge external to the code and easily extensible.
 
-1.  **Deprecate the `smart_extractor.py` Logic:** The current approach is fundamentally flawed. This logic should be replaced by more intelligent, LLM-driven prompts within the `extract` node of the graph in `graph.py`.
+2.  **Implement an Agentic Planner:**
+    - In `backend/graph.py`, enhance the `planner` node in the `MedicalEnrichmentPipeline`. Instead of a simple `if` statement, use an LLM call to create a dynamic plan.
+    - The planner should receive the full context and decide on a sequence of steps (e.g., `['resolve_hospital_domain', 'primary_email_search', 'extract_email']`). The graph should then execute this plan.
 
-2.  **LLM-Powered Email Extraction:**
-    *   **New Prompt:** `"You are an expert data extractor specializing in medical professionals. From the provided search results for '${intent}', find the most likely professional email address for the surgeon. Validate your answer. The email domain should plausibly match the surgeon's institution, or the name should match the surgeon. Prioritize direct emails (e.g., j.carter@chicagohospital.org) over generic ones (e.g., surgery-dept@chicagohospital.org)."`
-    *   **Benefit:** This uses the LLM's reasoning to validate the email against the context, drastically reducing errors.
+3.  **Enable Self-Correction with a Cyclical Graph:**
+    - Modify the `langgraph` structure in `backend/graph.py` to be cyclical.
+    - Add a `validate_answer` node after the `extract` node.
+    - If `validate_answer` determines the result is poor (e.g., "Information not found"), it should route the process back to the `planner` node to try a new strategy (e.g., use `advanced` search, generate a new query). This creates a powerful self-correction loop.
 
-3.  **LLM-Powered LinkedIn URL Extraction:**
-    *   **New Prompt:** `"From the provided search results for '${intent}', find the official LinkedIn profile URL for the surgeon. To validate, the profile's name must closely match '${surgeon_name}', and the listed specialty or institution should align with the known context. Return only the validated URL."`
-    *   **Benefit:** This ensures the correct profile is found by cross-referencing multiple data points, something the current regex cannot do.
+4.  **Decouple Frontend from Backend Configuration:**
+    - In `app.py`, create a new endpoint like `/api/supported-fields`. This endpoint should read the field profiles from the configuration files and return a list of supported field names.
+    - In `ui/src/App.tsx`, remove the hardcoded `TARGET_FIELDS` array. Instead, fetch the list of supported fields from the new `/api/supported-fields` endpoint when the application loads.
 
----
+## 4. Flaw: Inconsistent User Experience
 
-## 4. Streamlining the Backend for Better Performance
+**Analysis:** The UI provides excellent real-time feedback for single-column enrichment via streaming but offers no feedback for full-table enrichment, which appears as a long, blocking operation.
 
-**Problem:** The API in `app.py` has several endpoints for different enrichment tasks (`/enrich-column`, `/enrich-table`, etc.). This adds complexity, and the performant streaming feature is not used for all actions.
+**Instructions for Remediation:**
 
-**Proposed Solution: Consolidate into a Single, Efficient Streaming API.**
-
-1.  **Single Streaming Endpoint:**
-    *   Consolidate all enrichment logic into one primary endpoint: `/api/enrich-medical/stream`.
-    *   This endpoint should accept a list of all enrichment tasks the user requests at once, whether for one column or the whole table.
-
-2.  **Universal Streaming for a Better UX:**
-    *   The backend should process all tasks and stream results back field-by-field. This provides a consistent, responsive user experience for all actions and simplifies the frontend logic in `Spreadsheet.tsx`.
-
-3.  **Improved Concurrency:**
-    *   The `SequentialBatchProcessor` can be enhanced to handle a mixed queue of tasks from different columns concurrently, which is more efficient than processing column-by-column.
-
----
-
-## 5. Improving the User Experience
-
-**Problem:** While the fixed set of columns is acceptable, the user interaction with the enrichment process is minimal and not very transparent.
-
-**Proposed Solution: Make the Enrichment Process More Interactive and Transparent.**
-
-1.  **Show the Agent's Work:**
-    *   When a cell is being enriched, the UI could show more than just a spinner. It could display the current "intent" or "strategy" being used (e.g., "Searching for email for Dr. Carter at Chicago General"). This makes the agent feel more intelligent and gives the user insight into the process.
-
-2.  **Allow for User Feedback/Hints:**
-    *   If an enrichment fails or returns the wrong information, the UI could provide an option for the user to intervene.
-    *   For example, a "Refine Search" button could appear on a failed cell, allowing the user to provide a hint (e.g., an alternative spelling of a name, or a different affiliated institution). This hint would be fed back into the context for a new enrichment attempt, creating a collaborative human-in-the-loop system.
+1.  **Standardize on Streaming Enrichment:**
+    - As detailed in Flaw #2, refactor the `enrichTable` function in `ui/src/components/Spreadsheet.tsx` to sequentially call the `enrichColumn` function for every column that needs to be enriched.
+    - This ensures that all enrichment tasks, whether for a single column or the whole table, use the streaming API. The user will see cells being populated in real-time, providing a consistent and superior experience. This change also simplifies the backend by removing the need for a separate table enrichment endpoint.

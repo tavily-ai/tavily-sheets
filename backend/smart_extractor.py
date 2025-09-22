@@ -42,7 +42,7 @@ class SmartFieldExtractor:
             return "Information not found"
     
     def _extract_linkedin_url(self, context: Dict[str, Any], llm_response: str) -> str:
-        """Simple LinkedIn URL extraction - just find the URL, that's it."""
+        """Extract LinkedIn URL with broader patterns and basic name validation."""
         
         # Check all text sources for LinkedIn URLs
         all_text = f"{llm_response} {context.get('tavily_answer', '')} {context.get('search_content', '')}"
@@ -51,34 +51,82 @@ class SmartFieldExtractor:
         for result in context.get('search_results', []):
             all_text += f" {result.get('url', '')} {result.get('content', '')}"
         
-        # Simple regex to find LinkedIn profile URLs - be more flexible
-        linkedin_pattern = r'(?:https?://)?(?:www\.)?linkedin\.com/in/[a-zA-Z0-9\-_%]+/?'
+        # Broader regex to find LinkedIn profile URLs
+        linkedin_pattern = r'(?:https?://)?(?:[a-z]+\.)?linkedin\.com/(?:in|pub|profile)/[a-zA-Z0-9\-_%]+/?(?:\?[^\s]*)?'
         matches = re.findall(linkedin_pattern, all_text)
         
         if matches:
-            # Clean up the URL and ensure it has https://
-            url = matches[0].rstrip('/')
-            if not url.startswith('http'):
-                url = 'https://' + url
-            self.logger.info(f"LinkedIn URL found: {url}")
-            return url
+            # Basic validation against doctor name tokens
+            doctor_name = (context.get('doctor_name') or '').strip().lower()
+            name_tokens = [t for t in re.split(r'\s+', doctor_name) if t and len(t) > 1]
+            scored = []
+            for url in matches:
+                clean = url if url.startswith('http') else 'https://' + url
+                path = clean.split('linkedin.com/')[-1].lower()
+                score = 0
+                for token in name_tokens:
+                    if token in path:
+                        score += 1
+                # prefer /in/ and medical hints
+                if '/in/' in path:
+                    score += 1
+                if any(h in path for h in ['md', 'dr', 'doctor']):
+                    score += 1
+                scored.append((score, clean.rstrip('/')))
+            scored.sort(reverse=True)
+            best = scored[0][1]
+            self.logger.info(f"LinkedIn URL found: {best}")
+            return best
         
         return "Information not found"
     
     def _extract_email(self, context: Dict[str, Any], llm_response: str) -> str:
-        """Simple email extraction."""
+        """Robust email extraction including obfuscations and ranking."""
         all_text = f"{llm_response} {context.get('tavily_answer', '')} {context.get('search_content', '')}"
-        
-        # Simple email regex
-        email_pattern = r'\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Z|a-z]{2,}\b'
-        matches = re.findall(email_pattern, all_text)
-        
-        # Filter out obvious system emails
-        for email in matches:
-            if not any(bad in email.lower() for bad in ['noreply', 'no-reply', 'admin@']):
-                return email
-        
-        return "Information not found"
+        for result in context.get('search_results', []):
+            all_text += f" {result.get('url', '')} {result.get('content', '')} {result.get('raw_content', '')}"
+
+        # Standard emails
+        std_pattern = r'\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}\b'
+        # Obfuscations: "name at domain dot com", "name[at]domain[dot]org", "name (at) domain (dot) edu"
+        obf_pattern = r'\b([A-Za-z0-9._%+-]+)\s*(?:\[?\(?\s*at\s*\)?\]?|@)\s*([A-Za-z0-9.-]+)\s*(?:\[?\(?\s*dot\s*\)?\]?|\.)\s*([A-Za-z]{2,})\b'
+
+        candidates = set(re.findall(std_pattern, all_text))
+        for user, domain, tld in re.findall(obf_pattern, all_text, flags=re.IGNORECASE):
+            candidates.add(f"{user}@{domain}.{tld}")
+
+        # Clean and rank
+        cleaned = []
+        doctor_name = (context.get('doctor_name') or '').strip().lower()
+        hospital_name = (context.get('hospital_name') or '').strip().lower()
+        name_tokens = [t for t in re.split(r'\s+', doctor_name) if t and len(t) > 1]
+        bad_tokens = ['noreply', 'no-reply', 'donotreply', 'admin', 'webmaster', 'info@', 'support@']
+
+        for email in candidates:
+            e = email.strip().lower()
+            if any(b in e for b in bad_tokens):
+                continue
+            score = 0
+            local, _, domain = e.partition('@')
+            # Name token match
+            for token in name_tokens:
+                if token in local:
+                    score += 1
+            # Hospital/practice domain hint
+            if hospital_name:
+                for token in hospital_name.split():
+                    if token.isalpha() and token in domain:
+                        score += 1
+            # Prefer edu/org over generic if tied
+            if domain.endswith('.edu') or domain.endswith('.org'):
+                score += 1
+            cleaned.append((score, e))
+
+        if not cleaned:
+            return "Information not found"
+
+        cleaned.sort(reverse=True)
+        return cleaned[0][1]
     
     def _extract_credentials(self, context: Dict[str, Any], llm_response: str) -> str:
         """Simple credentials extraction."""

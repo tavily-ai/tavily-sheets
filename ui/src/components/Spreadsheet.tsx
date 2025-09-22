@@ -163,7 +163,9 @@ const Spreadsheet: React.FC<SpreadsheetProps> = ({
           return surgeon;
         });
 
-      const targetFields = [data.headers[colIndex]]; // Single field enrichment
+      // Canonicalize the field heading on send
+      const canonicalizeField = (name: string) => name.toLowerCase().replace(/[^a-z0-9]+/g, '_').replace(/^_+|_+$/g, '');
+      const targetFields = [canonicalizeField(data.headers[colIndex])]; // Single field enrichment
 
       // Use fetch with streaming instead of EventSource since we need POST
       const response = await fetch(`${API_URL}/api/enrich-medical/stream`, {
@@ -269,7 +271,7 @@ const Spreadsheet: React.FC<SpreadsheetProps> = ({
                     });
                     break;
                     
-                  case 'complete':
+                  case 'enrichment_complete':
                     setToast({
                       message: `Enrichment completed! Processed ${processedCount} cells`,
                       type: "success",

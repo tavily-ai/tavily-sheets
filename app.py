@@ -5,6 +5,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 from typing import Dict, Optional, List
+import re
 from jose import JWTError, jwt
 import json
 from contextlib import asynccontextmanager
@@ -135,6 +136,32 @@ def parse_authorization_header(auth_header: Optional[str]) -> Optional[str]:
     
     # Handle raw key
     return auth_header
+
+# ------------------------
+# Field canonicalization
+# ------------------------
+_FIELD_SYNONYMS = {
+    "email": {"email", "e_mail", "mail", "emailaddress"},
+    "linkedin_url": {"linkedin", "linkedin_url", "linked_in", "linkedinprofile", "linkedinprofileurl"},
+    "phone": {"phone", "phone_number", "telephone", "tel"},
+    "hospital_name": {"hospital", "hospital_name", "institution", "clinic"},
+}
+
+def canonicalize_field(field_name: str) -> str:
+    """Normalize incoming field names to canonical snake_case keys."""
+    if not isinstance(field_name, str):
+        return field_name
+    normalized = re.sub(r"[^a-z0-9]+", "_", field_name.strip().lower()).strip("_")
+    for canonical, variants in _FIELD_SYNONYMS.items():
+        if normalized in variants:
+            return canonical
+    return normalized
+
+def canonicalize_record_keys(record: Dict) -> Dict:
+    """Return a copy of record with canonicalized keys (values preserved)."""
+    if not isinstance(record, dict):
+        return record
+    return {canonicalize_field(k): v for k, v in record.items()}
 
 def init_clients(tavily_api_key: str):
     """Initialize all clients that have valid API keys"""
@@ -423,12 +450,13 @@ async def enrich_medical_data(
         query_llm_provider = get_query_llm_provider()
         tavily_client = get_tavily_client(api_key)
         
-        logger.info(f"[{trace_id}] Processing medical enrichment for {request.name}, field: {request.target_field}")
+        canonical_field = canonicalize_field(request.target_field)
+        logger.info(f"[{trace_id}] Processing medical enrichment for {request.name}, field: {canonical_field}")
 
         enrich_start_time = time.time()
         result = await enrich_medical_field(
             name=request.name,
-            target_field=request.target_field,
+            target_field=canonical_field,
             hospital_name=request.hospital_name,
             address=request.address,
             phone=request.phone,
@@ -455,7 +483,7 @@ async def enrich_medical_data(
         
         return MedicalEnrichmentResponse(
             name=request.name,
-            enriched_data={request.target_field: result.answer or "Information not found"},
+            enriched_data={canonical_field: result.answer or "Information not found"},
             sources=sources,
             enrichment_status=result.enrichment_status,
             credits_used=result.credits_used,
@@ -518,20 +546,24 @@ async def enrich_medical_batch(
         query_llm_provider = get_query_llm_provider()
         tavily_client = get_tavily_client(api_key)
         
-        logger.info(f"[{trace_id}] Starting sequential batch medical enrichment for {len(request.surgeons)} surgeons with {len(request.target_fields)} fields each")
+        # Canonicalize fields and surgeon records
+        canonical_fields = [canonicalize_field(f) for f in request.target_fields]
+        surgeons_canonical = [canonicalize_record_keys(s) for s in request.surgeons]
+
+        logger.info(f"[{trace_id}] Starting sequential batch medical enrichment for {len(surgeons_canonical)} surgeons with {len(canonical_fields)} fields each")
 
         # Filter to only process empty cells and create enrichment tasks 
         cell_filter = CellEnrichmentFilter()
         tasks = []
         task_metadata = []
         
-        for surgeon_idx, surgeon_data in enumerate(request.surgeons):
+        for surgeon_idx, surgeon_data in enumerate(surgeons_canonical):
             name = surgeon_data.get("name", "")
             if not name.strip():
                 continue
             
             # Get only fields that need enrichment (empty cells)
-            fields_to_enrich = cell_filter.get_fields_to_enrich(surgeon_data, request.target_fields)
+            fields_to_enrich = cell_filter.get_fields_to_enrich(surgeon_data, canonical_fields)
             
             if not fields_to_enrich:
                 logger.info(f"[{trace_id}] Skipping surgeon {name} - all target fields already populated")
@@ -950,6 +982,10 @@ async def stream_medical_enrichment(
         query_llm_provider = get_query_llm_provider()
         tavily_client = get_tavily_client(api_key)
         
+        # Canonicalize fields and surgeon objects
+        canonical_fields = [canonicalize_field(f) for f in request_data.target_fields]
+        surgeons_canonical = [canonicalize_record_keys(s) for s in request_data.surgeons]
+
         # Create streaming enricher
         enricher = StreamingMedicalEnricher(batch_size=3, requests_per_minute=80)
         
@@ -957,8 +993,8 @@ async def stream_medical_enrichment(
         async def generate_stream():
             try:
                 async for event in enricher.stream_enrichments(
-                    surgeons=request_data.surgeons,
-                    fields=request_data.target_fields,
+                    surgeons=surgeons_canonical,
+                    fields=canonical_fields,
                     tavily_client=tavily_client,
                     llm_provider=llm_provider,
                     query_llm_provider=query_llm_provider,

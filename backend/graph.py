@@ -115,7 +115,7 @@ async def _tavily_wrapper(tavily_client, operation: str, **kwargs):
                     
                     # Update circuit breaker on failure
                     _circuit_breaker.failure_count += 1
-                    _circuit_breaker.last_failure_time = current_time
+                    _circuit_breaker.last_failure_time = time.time()
                     
                     # Open circuit if threshold exceeded
                     if (_circuit_breaker.state == "CLOSED" and 
@@ -344,9 +344,15 @@ class MedicalEnrichmentPipeline:
 
     async def _search_with_email_fallback(self, state: MedicalEnrichmentContext, cache_key: str) -> MedicalEnrichmentContext:
         """Perform primary search for email with fallback if needed"""
+        # Resolve hospital/practice domain when possible to scope queries
+        resolved_domain = await self._resolve_hospital_domain(state.hospital_name) if state.hospital_name else None
+
         # Primary search - focused on direct contact
-        primary_query = await self._build_primary_email_query(state)
+        primary_query = await self._build_primary_email_query(state, resolved_domain)
         search_config = self._get_search_config("email")
+        if resolved_domain:
+            # Scope to the official domain for better precision
+            search_config = {**search_config, "include_domains": [resolved_domain]}
         
         logger.info(f"Primary email search for {state.name}: {primary_query}")
         
@@ -359,10 +365,14 @@ class MedicalEnrichmentPipeline:
         
         # Fallback search if primary didn't find email content
         if not has_email_content:
-            fallback_query = await self._build_fallback_email_query(state)
+            fallback_query = await self._build_fallback_email_query(state, resolved_domain)
             logger.info(f"Fallback email search for {state.name}: {fallback_query}")
             
-            fallback_result = await self._execute_search(fallback_query, search_config)
+            # For fallback, remove strict domain scoping if primary failed
+            fallback_search_config = dict(search_config)
+            if resolved_domain:
+                fallback_search_config.pop("include_domains", None)
+            fallback_result = await self._execute_search(fallback_query, fallback_search_config)
             credits_used += search_config['credits']
             strategy_parts.append(f"fallback-{search_config['search_depth']}")
             
@@ -449,19 +459,23 @@ class MedicalEnrichmentPipeline:
             **{k: v for k, v in primary.items() if k not in ["results", "answer"]}
         }
 
-    async def _build_primary_email_query(self, state: MedicalEnrichmentContext) -> str:
+    async def _build_primary_email_query(self, state: MedicalEnrichmentContext, domain: Optional[str] = None) -> str:
         """Build focused query for direct email contact"""
         name = state.name
         hospital = state.hospital_name or ""
         
-        query_parts = [f'"{name}" email address contact']
+        if domain:
+            # Prefer scoping to official domain when available
+            query_parts = [f'site:{domain}', f'"{name}"', 'email', 'contact']
+        else:
+            query_parts = [f'"{name}" email address contact']
         if hospital:
             query_parts.append(f'"{hospital}"')
         query_parts.extend(["doctor", "surgeon", "professional"])
         
         return " ".join(query_parts)
 
-    async def _build_fallback_email_query(self, state: MedicalEnrichmentContext) -> str:
+    async def _build_fallback_email_query(self, state: MedicalEnrichmentContext, domain: Optional[str] = None) -> str:
         """Build broader query for email with department/hospital contacts"""
         name = state.name
         hospital = state.hospital_name or ""
@@ -474,7 +488,10 @@ class MedicalEnrichmentPipeline:
                     specialty_info = str(value)
                     break
         
-        query_parts = [f'"{name}"']
+        if domain:
+            query_parts = [f'site:{domain}', f'"{name}"']
+        else:
+            query_parts = [f'"{name}"']
         if hospital:
             query_parts.append(f'"{hospital}"')
         if specialty_info:
@@ -813,15 +830,59 @@ QUERY EXAMPLE: "Dr [Name] {field} [Hospital] [Location]"
         
         # Basic search (1 credit) - for straightforward factual information
         else:
-            return {
+            config = {
                 "search_depth": "basic", 
-                "max_results": 12,  # Maximize results within 1-credit cost
-                "include_raw_content": "markdown",  # Simple text extraction sufficient
-                "include_answer": "basic",  # Quick LLM answers
-                "auto_parameters": False,  # Prevent auto-upgrade to advanced
+                "max_results": 12,
+                "include_raw_content": "markdown",
+                "include_answer": "basic",
+                "auto_parameters": False,
                 "credits": 1,
                 "reason": f"Basic search for {field} information"
             }
+            # Scope LinkedIn to linkedin.com
+            if field == "linkedin_url":
+                config["include_domains"] = ["linkedin.com"]
+                config["reason"] = "Domain-scoped LinkedIn lookup"
+            return config
+
+    async def _resolve_hospital_domain(self, hospital_name: Optional[str]) -> Optional[str]:
+        """Resolve an institution's primary domain via a quick search."""
+        try:
+            if not hospital_name or not hospital_name.strip():
+                return None
+            query = f"{hospital_name} official website"
+            search_params = {
+                "query": query,
+                "search_depth": "basic",
+                "max_results": 5,
+                "include_raw_content": "markdown",
+                "include_answer": "basic",
+                "auto_parameters": False,
+            }
+            result = await _tavily_wrapper(self.tavily, "search", **search_params)
+            if not result or not result.get("results"):
+                return None
+            # Pick the first sensible domain
+            skip_domains = {"linkedin.com", "facebook.com", "twitter.com", "x.com", "instagram.com", "wikipedia.org"}
+            for item in result["results"]:
+                url = item.get("url") or ""
+                if not url:
+                    continue
+                try:
+                    from urllib.parse import urlparse
+                    netloc = urlparse(url).netloc.lower()
+                    # Strip www.
+                    if netloc.startswith("www."):
+                        netloc = netloc[4:]
+                    root = netloc
+                    if any(skip in root for skip in skip_domains):
+                        continue
+                    return root
+                except Exception:
+                    continue
+            return None
+        except Exception:
+            return None
 
     async def extract_field_data(self, state: MedicalEnrichmentContext) -> MedicalEnrichmentContext:
         """Extract specific field data using appropriate complexity model and leveraging Tavily's answers"""
@@ -866,9 +927,31 @@ QUERY EXAMPLE: "Dr [Name] {field} [Hospital] [Location]"
                 state.enrichment_status.append(f"extract_no_content:{datetime.now().isoformat()}")
                 return state
             
+            # Deterministic first for LinkedIn/email to reduce variance
+            extraction_context = {
+                'doctor_name': state.name,
+                'tavily_answer': tavily_answer,
+                'search_content': content,
+                'search_results': state.search_result.get('results', []) if state.search_result else [],
+                'source_quality': self._assess_source_quality(state.search_result.get('results', [])) if state.search_result else {},
+                'num_sources': len(state.search_result.get('results', [])) if state.search_result else 0,
+                'has_linkedin_mentions': any('linkedin' in str(r).lower() for r in (state.search_result.get('results', []) if state.search_result else [])),
+                'has_email_mentions': any('@' in str(r) for r in (state.search_result.get('results', []) if state.search_result else [])),
+                'hospital_name': state.hospital_name or "",
+            }
+
+            if state.target_field in ["linkedin_url", "email"]:
+                deterministic_answer = self._validate_and_extract_field_data(state.target_field, tavily_answer or content, extraction_context)
+                if deterministic_answer and deterministic_answer != "Information not found":
+                    state.answer = deterministic_answer
+                    self._update_sources(state)
+                    state.last_updated = datetime.now()
+                    state.enrichment_status.append(f"extract_success:{datetime.now().isoformat()}:deterministic")
+                    return state
+
             # Determine complexity level for LLM model selection
             complexity = self._get_complexity_level(state.target_field)
-            
+
             # Build field-specific prompt
             prompt = self._build_extraction_prompt(state, tavily_answer, content)
             
@@ -886,28 +969,7 @@ QUERY EXAMPLE: "Dr [Name] {field} [Hospital] [Location]"
                 logger.info(f"LinkedIn extraction debug - Raw GenAI response: '{answer}'")
 
             # Enhanced context for smart extraction
-            if state.search_result and state.search_result.get("results"):
-                search_results = state.search_result["results"]
-                # Add context about source quality and relevance
-                source_quality = self._assess_source_quality(search_results)
-                extraction_context = {
-                    'doctor_name': state.name,
-                    'tavily_answer': tavily_answer,
-                    'search_content': content,
-                    'search_results': search_results,
-                    'source_quality': source_quality,
-                    'num_sources': len(search_results),
-                    'has_linkedin_mentions': any('linkedin' in str(result).lower() for result in search_results),
-                    'has_email_mentions': any('@' in str(result) for result in search_results)
-                }
-            else:
-                extraction_context = {
-                    'doctor_name': state.name,
-                    'tavily_answer': tavily_answer,
-                    'search_content': content,
-                    'search_results': [],
-                    'source_quality': {}
-                }
+            # Reuse the richer context for smart extractor validation
                 
             validated_answer = self._validate_and_extract_field_data(
                 state.target_field, answer, extraction_context
@@ -1223,15 +1285,22 @@ RETURN EXACTLY:""")
             return "Information not found"
 
     def build_graph(self):
-        """Build and compile the medical enrichment graph"""
+        """Build and compile the medical enrichment graph with a lightweight planner."""
+        async def planner(state: MedicalEnrichmentContext) -> str:
+            # Route deterministically for fields with known strategies
+            if state.target_field in ["linkedin_url", "email", "phone"]:
+                return "search"  # use specialized search configs
+            return "search"
+
         graph = StateGraph(MedicalEnrichmentContext)
+        graph.add_node("plan", planner)
         graph.add_node("search", self.search_medical_data)
         graph.add_node("extract", self.extract_field_data)
-        graph.add_edge(START, "search")
+        graph.add_edge(START, "plan")
+        graph.add_edge("plan", "search")
         graph.add_edge("search", "extract")
         graph.add_edge("extract", END)
-        compiled_graph = graph.compile()
-        return compiled_graph
+        return graph.compile()
 
 
 async def enrich_medical_field(
