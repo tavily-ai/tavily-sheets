@@ -6,6 +6,7 @@ import Toast from "./components/Toast";
 import { ColumnMapping } from "./components/ColumnMappingModal";
 import Papa from 'papaparse';
 import * as XLSX from 'xlsx';
+import { dataCache } from './utils/dataCache';
 
 const API_URL = import.meta.env.VITE_API_URL;
 const WS_URL = import.meta.env.VITE_WS_URL;
@@ -79,71 +80,45 @@ function App() {
   const [apiKey, setApiKey] = useState<string>('');
   const [isApiKeyOpen, setIsApiKeyOpen] = useState<boolean>(true);
   
-  // Separate storage for original data vs enriched data
-  const [originalData, setOriginalData] = useState<SpreadsheetData>(() => {
-    // Default data - always fresh on load
-    return {
-      headers: TARGET_FIELDS,
-      rows: Array(5)
-        .fill(0)
-        .map(() => Array(TARGET_FIELDS.length).fill({ value: "" })),
-    };
-  });
+  // Initialize default data
+  const defaultData: SpreadsheetData = {
+    headers: TARGET_FIELDS,
+    rows: Array(5)
+      .fill(0)
+      .map(() => Array(TARGET_FIELDS.length).fill({ value: "" })),
+  };
+  
+  // Initialize data FRESH every time; don't auto-restore from cache
+  const [data, setData] = useState<SpreadsheetData>(defaultData);
 
-  // Store only enriched cells separately
-  const [enrichedCells, setEnrichedCells] = useState<Map<string, {value: string, sources: any[]}>>(() => {
-    const saved = localStorage.getItem('tavily-sheets-enriched');
-    if (saved) {
-      try {
-        const parsed = JSON.parse(saved);
-        return new Map(Object.entries(parsed));
-      } catch (error) {
-        console.error('Error parsing enriched data:', error);
-      }
+  // Restore prompt state (user-controlled cache)
+  const [showRestorePrompt, setShowRestorePrompt] = useState<boolean>(false);
+  const [restoreCandidate, setRestoreCandidate] = useState<{
+    key: string;
+    data: SpreadsheetData;
+    timestamp: number;
+  } | null>(null);
+
+  // Enhanced setData that automatically caches
+  const setDataWithCache = (newData: SpreadsheetData | ((prevState: SpreadsheetData) => SpreadsheetData)) => {
+    const resolvedData = typeof newData === 'function' ? newData(data) : newData;
+    setData(resolvedData);
+    
+    // Auto-save to cache when data changes (debounced)
+    setTimeout(() => {
+      dataCache.saveToCache(resolvedData);
+    }, 1000);
+  };
+
+  // On mount, check if a valid cache exists and ask user whether to restore
+  useEffect(() => {
+    // Effects run client-side only; safe to access localStorage
+    const latest = dataCache.getLatest();
+    if (latest) {
+      setRestoreCandidate(latest);
+      setShowRestorePrompt(true);
     }
-    return new Map();
-  });
-
-  // Computed data that merges original + enriched
-  const [data, setData] = useState<SpreadsheetData>(() => {
-    return mergeOriginalWithEnriched(originalData, enrichedCells);
-  });
-
-  // Helper function to merge original data with enriched cells
-  function mergeOriginalWithEnriched(original: SpreadsheetData, enriched: Map<string, any>): SpreadsheetData {
-    const mergedRows = original.rows.map((row, rowIndex) => {
-      return row.map((cell, colIndex) => {
-        const cellKey = `${rowIndex}-${colIndex}`;
-        const enrichedValue = enriched.get(cellKey);
-        
-        if (enrichedValue) {
-          return {
-            value: enrichedValue.value,
-            enriched: true,
-            sources: enrichedValue.sources || []
-          };
-        }
-        
-        return { ...cell, enriched: false };
-      });
-    });
-
-    return {
-      headers: original.headers,
-      rows: mergedRows
-    };
-  }
-
-  // Save only enriched cells to localStorage
-  useEffect(() => {
-    const enrichedObj = Object.fromEntries(enrichedCells);
-    localStorage.setItem('tavily-sheets-enriched', JSON.stringify(enrichedObj));
-  }, [enrichedCells]);
-
-  // Update computed data when original or enriched changes
-  useEffect(() => {
-    setData(mergeOriginalWithEnriched(originalData, enrichedCells));
-  }, [originalData, enrichedCells]);
+  }, []);
 
   // New state for file import functionality
   const [isMappingModalOpen, setIsMappingModalOpen] = useState<boolean>(false);
@@ -151,35 +126,6 @@ function App() {
     headers: string[];
     data: any[];
   } | null>(null);
-
-  // Function to handle enrichment updates
-  const handleEnrichmentUpdate = (rowIndex: number, colIndex: number, value: string, sources: any[] = []) => {
-    const cellKey = `${rowIndex}-${colIndex}`;
-    setEnrichedCells(prev => {
-      const newMap = new Map(prev);
-      if (value && value.trim() && value !== "Information not found") {
-        newMap.set(cellKey, { value, sources });
-      } else {
-        newMap.delete(cellKey); // Remove if empty or not found
-      }
-      return newMap;
-    });
-  };
-
-  // Function to clear enriched data
-  const handleClearEnrichment = () => {
-    setEnrichedCells(new Map());
-  };
-
-  // Function to handle manual cell updates
-  const handleCellUpdate = (rowIndex: number, colIndex: number, value: string) => {
-    setOriginalData(prev => {
-      const newRows = [...prev.rows];
-      newRows[rowIndex] = [...newRows[rowIndex]];
-      newRows[rowIndex][colIndex] = { value, enriched: false };
-      return { ...prev, rows: newRows };
-    });
-  };
 
   // Add these styles at the top of the component, before the return statement
   const glassStyle: GlassStyle = {
@@ -189,75 +135,67 @@ function App() {
       "backdrop-filter backdrop-blur-lg bg-white/80 border border-gray-200 shadow-xl pl-10 w-full rounded-lg py-3 px-4 text-gray-900 focus:border-[#468BFF]/50 focus:outline-none focus:ring-1 focus:ring-[#468BFF]/50 placeholder-gray-400 bg-white/80 shadow-none",
   };
 
-  const handleFileUpload = (event: React.ChangeEvent<HTMLInputElement>) => {
-    const file = event.target.files?.[0];
-    if (!file) return;
+  const handleFileSelect = async (file: File) => {
+    try {
+      const fileExtension = file.name.toLowerCase().split('.').pop();
+      let headers: string[] = [];
+      let parsedData: any[] = [];
 
-    const reader = new FileReader();
-    
-    reader.onload = (e) => {
-      try {
-        const result = e.target?.result;
-        if (!result) return;
-
-        let headers: string[];
-        let parsedData: any[];
-
-        if (file.name.endsWith('.csv')) {
-          // Parse CSV
-          const csvData = Papa.parse(result as string, {
-            header: false,
-            skipEmptyLines: true
-          });
-          
-          if (csvData.errors.length > 0) {
-            throw new Error(`CSV parsing error: ${csvData.errors[0].message}`);
+      if (fileExtension === 'csv') {
+        // Parse CSV file
+        Papa.parse(file, {
+          header: true,
+          skipEmptyLines: true,
+          complete: (results) => {
+            if (results.errors.length > 0) {
+              throw new Error('CSV parsing error: ' + results.errors[0].message);
+            }
+            headers = results.meta.fields || [];
+            parsedData = results.data as any[];
+            setParsedInfo({ headers, data: parsedData });
+            setIsMappingModalOpen(true);
+          },
+          error: (error) => {
+            throw new Error('Failed to parse CSV: ' + error.message);
           }
-          
-          headers = csvData.data[0] as string[];
-          parsedData = csvData.data.slice(1).map((row: any) => {
-            const obj: any = {};
-            headers.forEach((header, index) => {
-              obj[header] = row[index] || '';
-            });
-            return obj;
-          });
-        } else if (file.name.endsWith('.xlsx') || file.name.endsWith('.xls')) {
-          // Parse Excel
-          const workbook = XLSX.read(result, { type: 'binary' });
-          const sheetName = workbook.SheetNames[0];
-          const worksheet = workbook.Sheets[sheetName];
-          const jsonData = XLSX.utils.sheet_to_json(worksheet, { header: 1 });
-          
-          if (jsonData.length === 0) {
-            throw new Error('Excel file is empty');
-          }
+        });
+      } else if (fileExtension === 'xlsx' || fileExtension === 'xls') {
+        // Parse Excel file
+        const arrayBuffer = await file.arrayBuffer();
+        const workbook = XLSX.read(arrayBuffer, { type: 'array' });
+        const firstSheetName = workbook.SheetNames[0];
+        const worksheet = workbook.Sheets[firstSheetName];
         
-          headers = jsonData[0] as string[];
-          parsedData = jsonData.slice(1).map((row: any[]) => {
-            const obj: any = {};
-            headers.forEach((header, index) => {
-              obj[header] = row[index] || '';
-            });
-            return obj;
-          });
-        } else {
-          throw new Error('Unsupported file type. Please upload CSV or Excel files.');
+        // Convert to JSON with header row
+        const jsonData = XLSX.utils.sheet_to_json(worksheet, { header: 1 }) as any[][];
+        
+        if (jsonData.length === 0) {
+          throw new Error('Excel file is empty');
         }
+        
+        headers = jsonData[0] as string[];
+        parsedData = jsonData.slice(1).map((row: any[]) => {
+          const obj: any = {};
+          headers.forEach((header, index) => {
+            obj[header] = row[index] || '';
+          });
+          return obj;
+        });
         
         setParsedInfo({ headers, data: parsedData });
         setIsMappingModalOpen(true);
-      } catch (error) {
-        console.error('File processing error:', error);
-        setToastDetail({
-          message: error instanceof Error ? error.message : 'Failed to process file',
-          type: 'error',
-          isShowing: true
-        });
+      } else {
+        throw new Error('Unsupported file type. Please upload CSV or Excel files.');
       }
-    };
-
-    reader.readAsBinaryString(file);
+      
+    } catch (error) {
+      console.error('File processing error:', error);
+      setToastDetail({
+        message: error instanceof Error ? error.message : 'Failed to process file',
+        type: 'error',
+        isShowing: true
+      });
+    }
   };
 
   const handleConfirmMapping = (mapping: ColumnMapping) => {
@@ -278,14 +216,12 @@ function App() {
         return transformedRow;
       });
 
-      // Update the original data (this will trigger recomputation)
-      setOriginalData({
+      // Update the spreadsheet with the transformed data - ALL target fields included
+      // Update state with new spreadsheet data
+      setDataWithCache({
         headers: TARGET_FIELDS,
         rows: transformedData
       });
-
-      // Clear any existing enriched data since we're importing fresh
-      setEnrichedCells(new Map());
 
       // Close modal and clear temporary state
       setIsMappingModalOpen(false);
@@ -300,7 +236,7 @@ function App() {
     } catch (error) {
       console.error('Mapping error:', error);
       setToastDetail({
-        message: error instanceof Error ? error.message : 'Failed to apply mapping',
+        message: error instanceof Error ? error.message : 'Failed to process mapping',
         type: 'error',
         isShowing: true
       });
@@ -308,25 +244,124 @@ function App() {
   };
 
   return (
-    <>
-      <ApiKeyInput 
-        isOpen={isApiKeyOpen}
-        onSubmit={(key) => {
-          setApiKey(key);
-          setIsApiKeyOpen(false);
+    <div className="min-h-screen bg-[radial-gradient(ellipse_at_top,_var(--tw-gradient-stops))] from-white via-gray-50 to-white p-8 relative overflow-hidden">
+      {/* Enhanced background with multiple layers */}
+      <div className="absolute inset-0 bg-[radial-gradient(circle_at_1px_1px,rgba(70,139,255,0.35)_1px,transparent_0)] bg-[length:24px_24px] bg-center"></div>
+
+      {toastDetail.isShowing && (
+        <Toast
+          message={toastDetail.message}
+          type={toastDetail.type}
+          onClose={() => setToastDetail({})}
+        />
+      )}
+
+      {/* Unsaved session restore banner */}
+      {showRestorePrompt && restoreCandidate && (
+        <div className="fixed top-5 left-1/2 -translate-x-1/2 z-50">
+          <div className="glass border border-gray-300/60 bg-white/90 text-gray-900 rounded-xl shadow-lg px-4 py-3 flex items-center gap-3">
+            <span className="text-sm">
+              You have an unsaved session from {new Date(restoreCandidate.timestamp).toLocaleString()}. 
+            </span>
+            <button
+              onClick={() => {
+                setDataWithCache(restoreCandidate.data);
+                setShowRestorePrompt(false);
+                setToastDetail({
+                  message: 'Session restored',
+                  type: 'success',
+                  isShowing: true
+                });
+              }}
+              className="text-sm px-3 py-1 rounded-md bg-[#468BFF] text-white hover:bg-[#8FBCFA] transition-colors"
+            >
+              Restore Session
+            </button>
+            <button
+              onClick={() => {
+                if (restoreCandidate) {
+                  dataCache.deleteCacheKey(restoreCandidate.key);
+                }
+                setShowRestorePrompt(false);
+                setRestoreCandidate(null);
+                setToastDetail({
+                  message: 'Starting fresh — old session discarded',
+                  type: 'info',
+                  isShowing: true
+                });
+              }}
+              className="text-sm px-3 py-1 rounded-md bg-gray-200 text-gray-800 hover:bg-gray-300 transition-colors"
+            >
+              Start Fresh
+            </button>
+          </div>
+        </div>
+      )}
+
+      {/* Add floating gradient orbs for visual interest */}
+      <motion.div
+        className="absolute top-1/4 right-1/4 w-64 h-64 rounded-full bg-gradient-to-br from-blue-300/20 to-purple-300/10 blur-3xl pointer-events-none"
+        animate={{
+          y: [0, -15, 0],
+          x: [0, 10, 0],
+          scale: [1, 1.05, 1],
         }}
-        onClose={() => setIsApiKeyOpen(false)}
+        transition={{
+          duration: 10,
+          repeat: Infinity,
+          repeatType: "reverse",
+        }}
+      />
+      <motion.div
+        className="absolute bottom-1/3 left-1/4 w-48 h-48 rounded-full bg-gradient-to-tr from-green-300/10 to-blue-300/20 blur-3xl pointer-events-none"
+        animate={{
+          y: [0, 20, 0],
+          x: [0, -15, 0],
+          scale: [1, 1.1, 1],
+        }}
+        transition={{
+          duration: 15,
+          repeat: Infinity,
+          repeatType: "reverse",
+        }}
       />
 
-      <div className="min-h-screen bg-gradient-to-br from-blue-50 via-white to-purple-50 p-4">
-        <Header 
-          glassStyle={glassStyle}
-          onFileUpload={handleFileUpload}
-          onClearData={handleClearEnrichment}
-        />
-        
+      {/* Add a subtle animated glow around the main content */}
+      <motion.div
+        className="absolute inset-0 mx-auto max-w-7xl h-full bg-gradient-to-b from-blue-50/10 to-purple-50/10 blur-3xl rounded-[40px] pointer-events-none"
+        initial={{ opacity: 0 }}
+        animate={{ opacity: 1 }}
+        transition={{ duration: 1.5 }}
+      />
+
+      <div className="max-w-7xl mx-auto space-y-8 relative">
+        {/* API Key Input Component */}
         <motion.div
-          className="max-w-7xl mx-auto mt-8"
+          initial={{ opacity: 0, y: -20 }}
+          animate={{ opacity: 1, y: 0 }}
+          transition={{ duration: 0.5 }}
+        >
+          <ApiKeyInput
+            apiKey={apiKey}
+            setApiKey={setApiKey}
+            isOpen={isApiKeyOpen}
+            setIsOpen={setIsApiKeyOpen}
+            glassStyle={glassStyle.card}
+          />
+        </motion.div>
+
+        {/* Header Component */}
+        <motion.div
+          initial={{ opacity: 0, y: -20 }}
+          animate={{ opacity: 1, y: 0 }}
+          transition={{ duration: 0.5, delay: 0.1 }}
+        >
+          <Header glassStyle={glassStyle.card} data={data} onFileSelect={handleFileSelect} />
+        </motion.div>
+
+        {/* Spreadsheet Component */}
+        <motion.div
+          className="relative"
           initial={{ opacity: 0 }}
           animate={{ opacity: 1 }}
           transition={{ duration: 0.5, delay: 0.2 }}
@@ -340,8 +375,7 @@ function App() {
 
           <Spreadsheet
             data={data}
-            onEnrichmentUpdate={handleEnrichmentUpdate}
-            onCellUpdate={handleCellUpdate}
+            setData={setDataWithCache}
             setToast={setToastDetail}
             apiKey={apiKey}
           />
@@ -361,10 +395,7 @@ function App() {
           onConfirm={handleConfirmMapping}
         />
       )}
-
-      {/* Toast Notification */}
-      <Toast toastDetail={toastDetail} setToastDetail={setToastDetail} />
-    </>
+    </div>
   );
 }
 

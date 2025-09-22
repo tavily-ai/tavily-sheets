@@ -7,6 +7,7 @@ from pydantic import BaseModel
 from typing import Dict, Optional, List
 from jose import JWTError, jwt
 import json
+from contextlib import asynccontextmanager
 
 import asyncio
 import logging
@@ -33,21 +34,68 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-load_dotenv()
-
 # Initialize API keys from environment
 APP_URL = os.getenv("VITE_APP_URL")
 VERTEX_AI_PROJECT_ID = os.getenv("VERTEX_AI_PROJECT_ID")
 
 JWT_SECRET = os.getenv('JWT_SECRET')
 
+# Global client storage with caching
+class AppState:
+    def __init__(self):
+        self.vertex_provider: Optional[VertexAIProvider] = None
+        self.query_llm_provider: Optional[VertexAIProvider] = None
+        self.tavily_clients: Dict[str, TavilyClient] = {}  # Cache clients by API key hash
+        # Track active streaming jobs for potential cancellation/cleanup
+        self.active_streams: Dict[str, list] = {}
+        
+    def get_tavily_client(self, api_key: str) -> TavilyClient:
+        """Get cached Tavily client or create new one"""
+        if not api_key:
+            raise ValueError("Tavily API key is required")
+        
+        # Use first 8 chars of API key as cache key (for security)
+        cache_key = api_key[:8] if len(api_key) >= 8 else api_key
+        
+        if cache_key not in self.tavily_clients:
+            self.tavily_clients[cache_key] = TavilyClient(api_key=api_key)
+            logger.info(f"Created new Tavily client for key ending in {cache_key}")
+        
+        return self.tavily_clients[cache_key]
+
+app_state = AppState()
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    """Initialize clients at startup and cleanup at shutdown"""
+    logger.info("Starting up application...")
+    
+    # Initialize both Vertex AI providers at startup
+    try:
+        if VERTEX_AI_PROJECT_ID:
+            # Create main provider
+            app_state.vertex_provider = VertexAIProvider(project_id=VERTEX_AI_PROJECT_ID)
+            logger.info("Successfully initialized main Vertex AI provider at startup")
+            
+            # Create lightweight query provider that reuses the client infrastructure
+            app_state.query_llm_provider = app_state.vertex_provider.create_lightweight_version("gemini-2.5-flash-lite")
+            logger.info("Successfully initialized lightweight query LLM provider at startup")
+        else:
+            logger.warning("VERTEX_AI_PROJECT_ID not found - Vertex AI providers not available")
+    except Exception as e:
+        logger.error(f"Failed to initialize Vertex AI providers at startup: {e}")
+    
+    logger.info("Application startup complete")
+    yield
+    logger.info("Application shutdown")
+
 app = FastAPI(
     title="Data Enrichment API",
     description="API for enriching spreadsheet data using Tavily and AI models",
-    version="1.0.0"
+    version="1.0.0",
+    lifespan=lifespan
 )
 
-# Configure CORS
 # Allow multiple development ports for flexibility
 allowed_origins = [
     "http://localhost:5173",
@@ -66,10 +114,6 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
-
-# Initialize clients at module level
-tavily_client = None
-vertex_provider = None
 
 def generate_trace_id() -> str:
     """Generate a unique trace ID for request tracking"""
@@ -94,35 +138,22 @@ def parse_authorization_header(auth_header: Optional[str]) -> Optional[str]:
 
 def init_clients(tavily_api_key: str):
     """Initialize all clients that have valid API keys"""
-    global tavily_client, vertex_provider
-    
+    # This function is now deprecated - clients are initialized at startup
+    # Keeping for backward compatibility but no longer modifying global state
     if not tavily_api_key:
         raise ValueError("Tavily API key is required")
-    
-    # Initialize Tavily client
-    tavily_client = TavilyClient(api_key=tavily_api_key)
-        
-    # Vertex AI provider (uses service account credentials)
-    try:
-        if VERTEX_AI_PROJECT_ID:
-            vertex_provider = VertexAIProvider(project_id=VERTEX_AI_PROJECT_ID)
-            logger.info("Successfully initialized Vertex AI provider")
-        else:
-            logger.error("VERTEX_AI_PROJECT_ID not found")
-            vertex_provider = None
-    except Exception as e:
-        logger.error(f"Failed to initialize vertex provider: {e}")
-        vertex_provider = None
 
-def get_llm_provider(provider_name: str, tavily_api_key: str) -> LLMProvider:
+def get_tavily_client(tavily_api_key: str) -> TavilyClient:
+    """Get cached Tavily client with the provided API key"""
+    return app_state.get_tavily_client(tavily_api_key)
+
+def get_llm_provider(provider_name: str) -> LLMProvider:
     """Get the requested LLM provider or raise an error if not available"""
-    init_clients(tavily_api_key)
-    
-    if provider_name == "vertex" and vertex_provider:
-        return vertex_provider
+    if provider_name == "vertex" and app_state.vertex_provider:
+        return app_state.vertex_provider
     else:
         available_providers = []
-        if vertex_provider: 
+        if app_state.vertex_provider: 
             available_providers.append("vertex")
         
         if not available_providers:
@@ -153,39 +184,127 @@ def get_llm_provider(provider_name: str, tavily_api_key: str) -> LLMProvider:
                 }
             )
 
-class WorkerPool:
-    """Bounded worker pool for processing tasks with rate limiting"""
+def get_query_llm_provider() -> LLMProvider:
+    """Get the query LLM provider or raise an error if not available"""
+    if app_state.query_llm_provider:
+        return app_state.query_llm_provider
+    else:
+        raise HTTPException(
+            status_code=500,
+            detail={
+                "error": "Query LLM provider not available",
+                "message": "Query LLM provider was not properly initialized at startup"
+            }
+        )
+
+class SequentialBatchProcessor:
+    """
+    Sequential batch processor that respects rate limits by processing small batches sequentially.
     
-    def __init__(self, max_workers: int = 2):  # Reduced from 8 to 2
-        self.max_workers = max_workers
-        self.semaphore = asyncio.Semaphore(max_workers)
+    This approach processes 3-4 cells at a time, then waits appropriately to respect Tavily's
+    100 req/min rate limit (with buffer at 80 req/min).
+    """
     
-    async def process_batch(self, tasks, worker_func):
-        """Process a batch of tasks with controlled concurrency"""
+    def __init__(self, batch_size: int = 3, requests_per_minute: int = 80):
+        """
+        Initialize sequential batch processor
+        
+        Args:
+            batch_size: Number of tasks to process concurrently in each batch (3-4 recommended)
+            requests_per_minute: Rate limit for API calls (80 req/min with buffer from 100)
+        """
+        self.batch_size = batch_size
+        self.requests_per_minute = requests_per_minute
+        self.min_delay_between_batches = 60.0 / requests_per_minute * batch_size  # Time to wait between batches
+        
+        logger.info(f"Initialized SequentialBatchProcessor: {self.batch_size} tasks per batch, "
+                   f"{self.requests_per_minute} req/min limit, {self.min_delay_between_batches:.1f}s between batches")
+    
+    async def process_tasks_sequentially(self, tasks, worker_func, progress_callback=None):
+        """
+        Process tasks in sequential batches with rate limiting
+        
+        Args:
+            tasks: List of task data to process
+            worker_func: Async function to process each task
+            progress_callback: Optional callback for progress updates
+            
+        Returns:
+            List of results corresponding to input tasks
+        """
         results = [None] * len(tasks)
+        total_tasks = len(tasks)
+        completed_tasks = 0
         
-        async def worker(task_idx, task_data):
-            async with self.semaphore:
+        logger.info(f"Processing {total_tasks} tasks in batches of {self.batch_size}")
+        
+        # Process tasks in sequential batches
+        for batch_start in range(0, total_tasks, self.batch_size):
+            batch_end = min(batch_start + self.batch_size, total_tasks)
+            batch_tasks = tasks[batch_start:batch_end]
+            batch_size = len(batch_tasks)
+            
+            batch_start_time = time.time()
+            logger.info(f"Processing batch {batch_start//self.batch_size + 1}/{(total_tasks + self.batch_size - 1)//self.batch_size} "
+                       f"(tasks {batch_start + 1}-{batch_end})")
+            
+            # Process current batch concurrently (but limited to batch_size)
+            batch_results = await self._process_single_batch(batch_tasks, worker_func, batch_start)
+            
+            # Store results
+            for i, result in enumerate(batch_results):
+                results[batch_start + i] = result
+            
+            completed_tasks += batch_size
+            batch_duration = time.time() - batch_start_time
+            
+            # Progress callback
+            if progress_callback:
                 try:
-                    result = await worker_func(task_data)
-                    results[task_idx] = result
+                    await progress_callback(completed_tasks, total_tasks, batch_duration)
                 except Exception as e:
-                    logger.error(f"Worker error for task {task_idx}: {str(e)}")
-                    results[task_idx] = {"error": str(e)}
+                    logger.error(f"Progress callback error: {e}")
+            
+            # Rate limiting: wait before next batch if needed
+            if batch_end < total_tasks:  # Not the last batch
+                elapsed_time = batch_duration
+                required_delay = self.min_delay_between_batches
+                
+                if elapsed_time < required_delay:
+                    wait_time = required_delay - elapsed_time
+                    logger.info(f"Rate limiting: waiting {wait_time:.1f}s before next batch")
+                    await asyncio.sleep(wait_time)
+                else:
+                    logger.info(f"Batch took {elapsed_time:.1f}s, no additional delay needed")
         
-        # Create worker tasks
-        worker_tasks = [
-            worker(idx, task_data) 
-            for idx, task_data in enumerate(tasks)
+        logger.info(f"Completed processing {total_tasks} tasks")
+        return results
+    
+    async def _process_single_batch(self, batch_tasks, worker_func, batch_start_idx):
+        """Process a single batch of tasks concurrently"""
+        batch_results = [None] * len(batch_tasks)
+        
+        async def batch_worker(local_idx, task_data):
+            global_idx = batch_start_idx + local_idx
+            try:
+                result = await worker_func(task_data)
+                batch_results[local_idx] = result
+                logger.debug(f"Task {global_idx + 1} completed successfully")
+            except Exception as e:
+                logger.error(f"Task {global_idx + 1} failed: {str(e)}")
+                batch_results[local_idx] = {"error": str(e), "status": "failed"}
+        
+        # Execute batch tasks concurrently
+        batch_workers = [
+            batch_worker(idx, task_data) 
+            for idx, task_data in enumerate(batch_tasks)
         ]
         
-        # Wait for all workers to complete
-        await asyncio.gather(*worker_tasks, return_exceptions=True)
-        
-        return results
+        await asyncio.gather(*batch_workers, return_exceptions=True)
+        return batch_results
 
-# Global worker pool
-worker_pool = WorkerPool(max_workers=2)  # Reduced to protect Tavily credits
+# Global sequential batch processor - optimized for rate-limited processing
+sequential_processor = SequentialBatchProcessor(batch_size=3, requests_per_minute=80)
 
 class SearchResult(BaseModel):
     title: str
@@ -300,7 +419,9 @@ async def enrich_medical_data(
                 trace_id=trace_id
             )
         
-        llm_provider = get_llm_provider(provider, api_key)
+        llm_provider = get_llm_provider(provider)
+        query_llm_provider = get_query_llm_provider()
+        tavily_client = get_tavily_client(api_key)
         
         logger.info(f"[{trace_id}] Processing medical enrichment for {request.name}, field: {request.target_field}")
 
@@ -312,7 +433,8 @@ async def enrich_medical_data(
             address=request.address,
             phone=request.phone,
             tavily_client=tavily_client,
-            llm_provider=llm_provider
+            llm_provider=llm_provider,
+            query_llm_provider=query_llm_provider
         )
         enrich_time = time.time() - enrich_start_time
         
@@ -392,11 +514,14 @@ async def enrich_medical_batch(
                 }
             )
         
-        llm_provider = get_llm_provider(provider, api_key)
+        llm_provider = get_llm_provider(provider)
+        query_llm_provider = get_query_llm_provider()
+        tavily_client = get_tavily_client(api_key)
         
-        logger.info(f"[{trace_id}] Starting batch medical enrichment for {len(request.surgeons)} surgeons")
+        logger.info(f"[{trace_id}] Starting sequential batch medical enrichment for {len(request.surgeons)} surgeons with {len(request.target_fields)} fields each")
 
-        # Create enrichment tasks
+        # Filter to only process empty cells and create enrichment tasks 
+        cell_filter = CellEnrichmentFilter()
         tasks = []
         task_metadata = []
         
@@ -404,8 +529,15 @@ async def enrich_medical_batch(
             name = surgeon_data.get("name", "")
             if not name.strip():
                 continue
+            
+            # Get only fields that need enrichment (empty cells)
+            fields_to_enrich = cell_filter.get_fields_to_enrich(surgeon_data, request.target_fields)
+            
+            if not fields_to_enrich:
+                logger.info(f"[{trace_id}] Skipping surgeon {name} - all target fields already populated")
+                continue
                 
-            for field in request.target_fields:
+            for field in fields_to_enrich:
                 task_data = {
                     "name": name,
                     "target_field": field,
@@ -413,7 +545,8 @@ async def enrich_medical_batch(
                     "address": surgeon_data.get("address"),
                     "phone": surgeon_data.get("phone"),
                     "tavily_client": tavily_client,
-                    "llm_provider": llm_provider
+                    "llm_provider": llm_provider,
+                    "query_llm_provider": query_llm_provider
                 }
                 tasks.append(task_data)
                 task_metadata.append((surgeon_idx, name, field))
@@ -422,9 +555,10 @@ async def enrich_medical_batch(
         async def enrich_worker(task_data):
             return await enrich_medical_field(**task_data)
 
-        # Execute enrichments with controlled concurrency
+        # Execute all enrichments using sequential batch processing with rate limiting
+        logger.info(f"[{trace_id}] Processing {len(tasks)} enrichment tasks using sequential batches of {sequential_processor.batch_size}")
         enrich_start_time = time.time()
-        results = await worker_pool.process_batch(tasks, enrich_worker)
+        results = await sequential_processor.process_tasks_sequentially(tasks, enrich_worker)
         enrich_time = time.time() - enrich_start_time
         
         # Organize results by surgeon
@@ -465,20 +599,21 @@ async def enrich_medical_batch(
                             ))
 
         total_time = time.time() - start_time
-        avg_time_per_task = enrich_time / len(tasks) if tasks else 0
-        logger.info(f"[{trace_id}] Batch medical enrichment completed in {enrich_time:.2f}s (total: {total_time:.2f}s)")
+        total_tasks = len(results)
+        logger.info(f"[{trace_id}] Sequential batch medical enrichment completed in {enrich_time:.2f}s (total: {total_time:.2f}s) for {total_tasks} enrichments")
 
         return {
             "results": list(surgeon_results.values()),
             "summary": {
                 "total_surgeons": len(request.surgeons),
-                "total_enrichments": len(tasks),
+                "total_enrichments": total_tasks,
                 "success_count": sum(1 for r in surgeon_results.values() if r["status"] == "success"),
                 "partial_error_count": sum(1 for r in surgeon_results.values() if r["status"] == "partial_error"),
                 "total_time": total_time,
-                "avg_time_per_enrichment": avg_time_per_task,
+                "enrichment_time": enrich_time,
+                "avg_time_per_enrichment": enrich_time / total_tasks if total_tasks else 0,
                 "total_credits_used": total_credits_used,
-                "avg_credits_per_enrichment": total_credits_used / len(tasks) if tasks else 0
+                "avg_credits_per_enrichment": total_credits_used / total_tasks if total_tasks else 0
             },
             "status": "success",
             "trace_id": trace_id
@@ -514,6 +649,279 @@ class StreamRequest(BaseModel):
     target_fields: List[str]
     provider: str = "vertex"
 
+class CellEnrichmentFilter:
+    """Utility class to determine which cells need enrichment"""
+    
+    @staticmethod
+    def is_cell_empty(value) -> bool:
+        """Check if a cell value is empty and needs enrichment"""
+        if value is None:
+            return True
+        if isinstance(value, str):
+            cleaned = value.strip().lower()
+            # Consider these as empty
+            empty_indicators = {
+                '', 'n/a', 'na', 'null', 'none', 'unknown', 'not found', 
+                'information not found', 'not available', '-', '--', '---'
+            }
+            return cleaned in empty_indicators
+        return False
+    
+    @staticmethod
+    def should_enrich_field(surgeon_data: Dict, field: str) -> bool:
+        """Determine if a specific field should be enriched for a surgeon"""
+        current_value = surgeon_data.get(field)
+        return CellEnrichmentFilter.is_cell_empty(current_value)
+
+class StreamingMedicalEnricher:
+    """
+    High-performance streaming medical enrichment processor that respects rate limits
+    and provides real-time field-by-field updates via Server-Sent Events.
+    """
+    
+    def __init__(self, batch_size: int = 3, requests_per_minute: int = 80):
+        self.batch_size = batch_size
+        self.requests_per_minute = requests_per_minute
+        self.min_batch_delay = 60.0 / requests_per_minute * batch_size
+        
+    async def stream_enrichments(
+        self,
+        surgeons: List[Dict],
+        fields: List[str],
+        tavily_client,
+        llm_provider,
+        query_llm_provider,
+        trace_id: str
+    ):
+        """
+        Stream enrichment results with real-time field updates and proper rate limiting.
+        
+        Yields SSE-formatted events for each field completion as they happen.
+        """
+        start_time = time.time()
+        
+        # Send connection event
+        yield self._format_sse("connected", {
+            "trace_id": trace_id,
+            "total_surgeons": len(surgeons),
+            "total_fields": len(fields),
+            "timestamp": time.time()
+        })
+        
+        # Initialize surgeon tracking
+        surgeon_results = {}
+        all_tasks = []
+        
+        # Create task queue with metadata
+        for surgeon_idx, surgeon in enumerate(surgeons):
+            surgeon_name = surgeon.get('name', '').strip()
+            if not surgeon_name:
+                continue
+                
+            surgeon_results[surgeon_idx] = {
+                "name": surgeon_name,
+                "enriched_data": {},
+                "sources": [],
+                "credits_used": 0,
+                "fields_completed": 0,
+                "total_fields": len(fields)
+            }
+            
+            # Send surgeon initialization
+            yield self._format_sse("surgeon_init", {
+                "surgeon_idx": surgeon_idx,
+                "name": surgeon_name,
+                "fields_to_enrich": fields,
+                "timestamp": time.time()
+            })
+            
+            # Create task queue with metadata - only for empty fields
+            for field in fields:
+                if CellEnrichmentFilter.should_enrich_field(surgeon, field):
+                    task_data = {
+                        "surgeon_idx": surgeon_idx,
+                        "surgeon_name": surgeon_name,
+                        "field": field,
+                        "enrich_params": {
+                            "name": surgeon_name,
+                            "target_field": field,
+                            "hospital_name": surgeon.get('hospital_name'),
+                            "address": surgeon.get('address'),
+                            "phone": surgeon.get('phone'),
+                            "all_context": surgeon,  # Pass all surgeon data as context
+                            "tavily_client": tavily_client,
+                            "llm_provider": llm_provider,
+                            "query_llm_provider": query_llm_provider
+                        }
+                    }
+                    all_tasks.append(task_data)
+                else:
+                    # Field already has data, skip enrichment
+                    logger.info(f"Skipping {field} for {surgeon_name} - already has value: {surgeon.get(field)}")
+            
+            # Update total fields count to only include fields that need enrichment
+            surgeon_results[surgeon_idx]["total_fields"] = len([f for f in fields if CellEnrichmentFilter.should_enrich_field(surgeon, f)])
+        
+        total_tasks = len(all_tasks)
+        completed_tasks = 0
+        total_credits = 0
+        
+        # Process tasks in rate-limited sequential batches
+        for batch_start in range(0, total_tasks, self.batch_size):
+            batch_end = min(batch_start + self.batch_size, total_tasks)
+            batch_tasks = all_tasks[batch_start:batch_end]
+            batch_num = batch_start // self.batch_size + 1
+            total_batches = (total_tasks + self.batch_size - 1) // self.batch_size
+            
+            batch_start_time = time.time()
+            logger.info(f"[{trace_id}] Processing batch {batch_num}/{total_batches} with {len(batch_tasks)} tasks")
+            
+            # Send batch start event
+            yield self._format_sse("batch_start", {
+                "batch_num": batch_num,
+                "total_batches": total_batches,
+                "batch_size": len(batch_tasks),
+                "timestamp": time.time()
+            })
+            
+            # Process batch tasks concurrently
+            batch_coros = []
+            for task in batch_tasks:
+                batch_coros.append(self._process_single_enrichment(task, surgeon_results))
+            
+            # Execute batch and stream results as they complete
+            batch_results = []
+            for coro in asyncio.as_completed(batch_coros):
+                try:
+                    result = await coro
+                    batch_results.append(result)
+                    
+                    # Stream field completion event immediately
+                    task_data = result["task_data"]
+                    surgeon_idx = task_data["surgeon_idx"]
+                    field = task_data["field"]
+                    enrichment_result = result["enrichment_result"]
+                    
+                    completed_tasks += 1
+                    total_credits += enrichment_result.get("credits_used", 0)
+                    
+                    # Update surgeon results
+                    surgeon_data = surgeon_results[surgeon_idx]
+                    surgeon_data["enriched_data"][field] = enrichment_result.get("answer", "Information not found")
+                    surgeon_data["credits_used"] += enrichment_result.get("credits_used", 0)
+                    surgeon_data["fields_completed"] += 1
+                    
+                    # Add sources if available
+                    if enrichment_result.get("sources"):
+                        surgeon_data["sources"].extend([
+                            {"title": src.get("title", "Unknown"), "url": src.get("url", "")}
+                            for src in enrichment_result["sources"]
+                            if isinstance(src, dict)
+                        ])
+                    
+                    # Send field completion event
+                    yield self._format_sse("field_complete", {
+                        "surgeon_idx": surgeon_idx,
+                        "surgeon_name": task_data["surgeon_name"],
+                        "field": field,
+                        "value": enrichment_result.get("answer", "Information not found"),
+                        "credits_used": enrichment_result.get("credits_used", 0),
+                        "search_strategy": enrichment_result.get("search_strategy"),
+                        "sources": surgeon_data["sources"][-len(enrichment_result.get("sources", [])):] if enrichment_result.get("sources") else [],
+                        "progress": completed_tasks / total_tasks,
+                        "timestamp": time.time()
+                    })
+                    
+                    # Check if surgeon is complete
+                    if surgeon_data["fields_completed"] >= surgeon_data["total_fields"]:
+                        yield self._format_sse("surgeon_complete", {
+                            "surgeon_idx": surgeon_idx,
+                            "name": task_data["surgeon_name"],
+                            "enriched_data": surgeon_data["enriched_data"],
+                            "total_sources": len(surgeon_data["sources"]),
+                            "total_credits": surgeon_data["credits_used"],
+                            "timestamp": time.time()
+                        })
+                        
+                except Exception as e:
+                    logger.error(f"[{trace_id}] Batch task error: {str(e)}")
+                    # Find the failed task and send error event
+                    yield self._format_sse("field_error", {
+                        "error": str(e),
+                        "timestamp": time.time()
+                    })
+            
+            batch_duration = time.time() - batch_start_time
+            
+            # Send batch completion event
+            yield self._format_sse("batch_complete", {
+                "batch_num": batch_num,
+                "duration": batch_duration,
+                "completed_tasks": len(batch_results),
+                "timestamp": time.time()
+            })
+            
+            # Rate limiting between batches
+            if batch_end < total_tasks:
+                wait_time = max(0, self.min_batch_delay - batch_duration)
+                if wait_time > 0:
+                    logger.info(f"[{trace_id}] Rate limiting: waiting {wait_time:.1f}s before next batch")
+                    yield self._format_sse("rate_limit_wait", {
+                        "wait_time": wait_time,
+                        "timestamp": time.time()
+                    })
+                    await asyncio.sleep(wait_time)
+        
+        # Send final completion event
+        total_time = time.time() - start_time
+        yield self._format_sse("enrichment_complete", {
+            "total_surgeons": len(surgeon_results),
+            "total_enrichments": completed_tasks,
+            "total_credits_used": total_credits,
+            "total_time": total_time,
+            "avg_time_per_enrichment": total_time / max(completed_tasks, 1),
+            "timestamp": time.time()
+        })
+    
+    async def _process_single_enrichment(self, task_data: Dict, surgeon_results: Dict) -> Dict:
+        """Process a single enrichment and return structured result."""
+        surgeon_idx = task_data["surgeon_idx"]
+        field = task_data["field"]
+        surgeon_name = task_data["surgeon_name"]
+        
+        try:
+            # Call the enrichment function
+            enrichment_result = await enrich_medical_field(**task_data["enrich_params"])
+            
+            # Convert to dict format
+            result_dict = {
+                "answer": enrichment_result.answer,
+                "credits_used": enrichment_result.credits_used,
+                "sources": enrichment_result.sources,
+                "search_strategy": enrichment_result.search_strategy,
+                "status": "success"
+            }
+            
+        except Exception as e:
+            logger.error(f"Enrichment failed for {surgeon_name} - {field}: {str(e)}")
+            result_dict = {
+                "answer": "Information not found",
+                "credits_used": 0,
+                "sources": [],
+                "search_strategy": None,
+                "status": "error",
+                "error": str(e)
+            }
+        
+        return {
+            "task_data": task_data,
+            "enrichment_result": result_dict
+        }
+    
+    def _format_sse(self, event_type: str, data: Dict) -> str:
+        """Format data as Server-Sent Event."""
+        return f"data: {json.dumps({'type': event_type, **data})}\n\n"
+
 @app.post("/api/enrich-medical/stream")
 async def stream_medical_enrichment(
     request_data: StreamRequest,
@@ -521,7 +929,6 @@ async def stream_medical_enrichment(
 ):
     """Stream medical enrichment results in real-time using Server-Sent Events."""
     trace_id = generate_trace_id()
-    start_time = time.time()
     
     try:
         # Parse Authorization from header
@@ -538,120 +945,29 @@ async def stream_medical_enrichment(
                 }
             )
         
-        # Get data from request body
-        surgeons_list = request_data.surgeons
-        fields_list = request_data.target_fields
-        provider = request_data.provider
+        # Initialize providers
+        llm_provider = get_llm_provider(request_data.provider)
+        query_llm_provider = get_query_llm_provider()
+        tavily_client = get_tavily_client(api_key)
         
-        llm_provider = get_llm_provider(provider, api_key)
+        # Create streaming enricher
+        enricher = StreamingMedicalEnricher(batch_size=3, requests_per_minute=80)
         
+        # Create the streaming generator
         async def generate_stream():
-            """Generate SSE stream of enrichment results."""
-            # Send initial connection event
-            yield f"data: {json.dumps({'type': 'connected', 'trace_id': trace_id, 'timestamp': time.time()})}\n\n"
-            
-            total_enrichments = len(surgeons_list) * len(fields_list)
-            completed = 0
-            total_credits = 0
-            
-            # Process each surgeon
-            for surgeon_idx, surgeon in enumerate(surgeons_list):
-                surgeon_name = surgeon.get('name', '')
-                if not surgeon_name.strip():
-                    continue
-                    
-                # Send surgeon start event
-                yield f"data: {json.dumps({'type': 'surgeon_start', 'surgeon_idx': surgeon_idx, 'name': surgeon_name, 'timestamp': time.time()})}\n\n"
-                
-                surgeon_results = {
-                    "name": surgeon_name,
-                    "enriched_data": {},
-                    "sources": [],
-                    "enrichment_status": [],
-                    "credits_used": 0
-                }
-                
-                # Process each field for this surgeon
-                for field_idx, field in enumerate(fields_list):
-                    try:
-                        # Send field start event
-                        yield f"data: {json.dumps({'type': 'field_start', 'surgeon_idx': surgeon_idx, 'field': field, 'timestamp': time.time()})}\n\n"
-                        
-                        result = await enrich_medical_field(
-                            name=surgeon_name,
-                            target_field=field,
-                            hospital_name=surgeon.get('hospital_name'),
-                            address=surgeon.get('address'),
-                            phone=surgeon.get('phone'),
-                            tavily_client=tavily_client,
-                            llm_provider=llm_provider
-                        )
-                        
-                        # Update results
-                        surgeon_results["enriched_data"][field] = result.answer or "Information not found"
-                        surgeon_results["credits_used"] += result.credits_used or 0
-                        surgeon_results["enrichment_status"].extend(result.enrichment_status)
-                        
-                        # Add sources
-                        if result.sources:
-                            for source in result.sources:
-                                if isinstance(source, dict):
-                                    surgeon_results["sources"].append({
-                                        "title": source.get("title", "Unknown"),
-                                        "url": source.get("url", "")
-                                    })
-                        
-                        total_credits += result.credits_used or 0
-                        completed += 1
-                        
-                        # Send field complete event with result
-                        field_result = {
-                            "type": "field_complete",
-                            "surgeon_idx": surgeon_idx,
-                            "field": field,
-                            "value": result.answer or "Information not found",
-                            "credits_used": result.credits_used or 0,
-                            "search_strategy": result.search_strategy,
-                            "sources": surgeon_results["sources"][-len(result.sources):] if result.sources else [],
-                            "progress": completed / total_enrichments,
-                            "timestamp": time.time()
-                        }
-                        yield f"data: {json.dumps(field_result)}\n\n"
-                        
-                    except Exception as e:
-                        logger.error(f"Error enriching {field} for {surgeon_name}: {str(e)}")
-                        
-                        # Send error event
-                        error_event = {
-                            "type": "field_error",
-                            "surgeon_idx": surgeon_idx,
-                            "field": field,
-                            "error": str(e),
-                            "timestamp": time.time()
-                        }
-                        yield f"data: {json.dumps(error_event)}\n\n"
-                
-                # Send surgeon complete event
-                surgeon_complete = {
-                    "type": "surgeon_complete",
-                    "surgeon_idx": surgeon_idx,
-                    "name": surgeon_name,
-                    "enriched_data": surgeon_results["enriched_data"],
-                    "credits_used": surgeon_results["credits_used"],
-                    "timestamp": time.time()
-                }
-                yield f"data: {json.dumps(surgeon_complete)}\n\n"
-            
-            # Send final completion event
-            completion_event = {
-                "type": "complete",
-                "total_surgeons": len(surgeons_list),
-                "total_enrichments": completed,
-                "total_credits_used": total_credits,
-                "total_time": time.time() - start_time,
-                "timestamp": time.time()
-            }
-            yield f"data: {json.dumps(completion_event)}\n\n"
+            try:
+                async for event in enricher.stream_enrichments(
+                    surgeons=request_data.surgeons,
+                    fields=request_data.target_fields,
+                    tavily_client=tavily_client,
+                    llm_provider=llm_provider,
+                    query_llm_provider=query_llm_provider,
+                    trace_id=trace_id
+                ):
+                    yield event
+            except Exception as e:
+                logger.error(f"[{trace_id}] Streaming error: {str(e)}")
+                yield f"data: {json.dumps({'type': 'stream_error', 'error': str(e), 'timestamp': time.time()})}\n\n"
         
         return StreamingResponse(
             generate_stream(),
@@ -676,7 +992,7 @@ async def stream_medical_enrichment(
             detail={
                 "error": "Internal server error during streaming enrichment",
                 "trace_id": trace_id,
-                "message": "An unexpected error occurred"
+                "message": str(e)
             }
         )
 
@@ -723,7 +1039,8 @@ async def enrich_data(
                 trace_id=trace_id
             )
         
-        llm_provider = get_llm_provider(provider, api_key)
+        llm_provider = get_llm_provider(provider)
+        tavily_client = get_tavily_client(api_key)
         
         logger.info(f"[{trace_id}] Processing single enrichment request for column: {request.column_name}")
 
@@ -809,7 +1126,8 @@ async def enrich_batch(
                 }
             )
 
-        llm_provider = get_llm_provider(provider, api_key)
+        llm_provider = get_llm_provider(provider)
+        tavily_client = get_tavily_client(api_key)
         
         logger.info(f"[{trace_id}] Starting batch enrichment for column: {request.column_name}")
         logger.info(f"[{trace_id}] Number of rows to process: {len(request.rows)}")
@@ -834,9 +1152,9 @@ async def enrich_batch(
         async def enrich_worker(task_data):
             return await enrich_cell_with_graph(**task_data)
 
-        # Execute enrichments with controlled concurrency
+        # Execute enrichments using sequential batch processing with rate limiting
         enrich_start_time = time.time()
-        enriched_results = await worker_pool.process_batch(tasks, enrich_worker)
+        enriched_results = await sequential_processor.process_tasks_sequentially(tasks, enrich_worker)
         enrich_time = time.time() - enrich_start_time
         
         # Process results and maintain original order
@@ -927,7 +1245,8 @@ async def enrich_table(
                 }
             )
         
-        llm_provider = get_llm_provider(provider, api_key)
+        llm_provider = get_llm_provider(provider)
+        tavily_client = get_tavily_client(api_key)
 
         logger.info(f"[{trace_id}] Starting table enrichment for {len(request.data)} columns")
 
@@ -952,9 +1271,9 @@ async def enrich_table(
         async def enrich_worker(task_data):
             return await enrich_cell_with_graph(**task_data)
 
-        # Execute enrichments with controlled concurrency
+        # Execute enrichments using sequential batch processing with rate limiting
         enrich_start_time = time.time()
-        enriched_results = await worker_pool.process_batch(tasks, enrich_worker)
+        enriched_results = await sequential_processor.process_tasks_sequentially(tasks, enrich_worker)
         enrich_time = time.time() - enrich_start_time
 
         # Initialize response containers

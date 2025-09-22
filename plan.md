@@ -1,77 +1,138 @@
-# Plan: Implement CSV/Excel File Import with Dynamic Column Mapping
+# Data Enrichment Application Refactoring Plan
 
-This document provides a detailed, step-by-step implementation plan for a coder agent. The objective is to introduce a file import feature that supports CSV and Excel files, with a crucial user-facing step for dynamic column mapping.
+## 1. Project Goal
 
-## Guiding Principles
-
--   **Client-Centric**: The entire file reading, parsing, and mapping process will be handled on the client-side to provide a fast, interactive, and seamless user experience. No backend changes are needed for this feature.
--   **Component-Based**: New functionality will be encapsulated in new, reusable components.
--   **State-Driven**: The UI will reactively update based on a centralized state managed in the main `App.tsx` component.
+The primary goal of this refactoring is to create a robust, predictable, and intelligent data enrichment application. This involves two main objectives:
+1.  **Fix State Management:** Overhaul the current persistence model to create a clean, stateless backend and a predictable frontend user experience.
+2.  **Enhance Query Intelligence:** Radically improve the search query generation system to be more effective for all enrichment types, especially complex and abstract fields.
 
 ---
 
-## Phase 1: Project Setup and Dependencies
+## 2. Objective 1: Resolve State and Persistence Issues
 
-**Objective:** Prepare the frontend environment by adding the necessary third-party libraries for file parsing.
+### Problem Analysis
+The current application suffers from a state management conflict between the backend and frontend, creating a confusing user experience.
+- **Backend:** Persists all enrichment results to a `enrichment_results.json` file. This file survives application restarts, preventing a "fresh start" and causing old data to reappear unexpectedly.
+- **Frontend:** Uses the browser's `localStorage` to persist *only* enriched cells. When the page is refreshed, the user's original input is lost, but the old enriched data is applied to a new blank grid, creating a disconnected state.
 
--   **Step 1.1: Modify `package.json`:**
-    -   Locate and open the `package.json` file within the `ui` directory.
-    -   Add `papaparse` and `xlsx` to the `dependencies` section. These are essential for parsing CSV and Excel files, respectively.
-    -   Add `@types/papaparse` to the `devDependencies` section to ensure TypeScript support.
+### Solution: A Stateless Backend and Session-Based Frontend
 
--   **Step 1.2: Install Dependencies:**
-    -   Execute `npm install` within the `ui` directory to download and install the newly added packages into the project.
+#### 2.1. Backend Refactoring (`backend/graph.py`)
+The backend will be made stateless between application runs.
 
----
+- **Action:** Remove all file-based persistence logic.
+  - **Step 1:** Delete the `save_enrichment_result` and `load_enrichment_result` functions.
+  - **Step 2:** In the `search_medical_data` function, remove the initial block that calls `load_enrichment_result`. The function must not read from any local files.
+  - **Step 3:** In the `extract_field_data` function, remove the call to `save_enrichment_result`. The function must not write to any local files.
+  - **Note:** The in-memory `TTLCache` (`_enrichment_cache`) should be kept, as it provides valuable de-duplication for identical requests within a single running session without causing the cross-session state problems.
 
-## Phase 2: UI Component Implementation
+#### 2.2. Frontend Refactoring (`ui/src/App.tsx`)
+The frontend will hold the entire application state in memory for a single browser session. The "Export" button will be the user's method for persisting their work.
 
-**Objective:** Create the user-facing elements for file import and column mapping.
-
--   **Step 2.1: Enhance the `Header` Component (`ui/src/components/Header.tsx`)**
-    -   **Props Interface:** Modify the `HeaderProps` interface to accept a new callback function prop named `onFileSelect`. This function will be invoked with the selected `File` object.
-    -   **File Input:** Add a hidden `<input type="file">` element within the component's render method. Configure its `accept` attribute to allow only CSV and Excel file types (`.csv`, `.xlsx`, `.xls`).
-    -   **Import Button:** Add a new "Import" button to the UI, visually grouping it with the existing "Export" button. This button should be styled consistently with the application's theme and include an `Upload` icon from the `lucide-react` library.
-    -   **Event Handling:** Create a click handler for the "Import" button that programmatically triggers a click on the hidden file input. The file input's `onChange` event should call the `onFileSelect` prop with the selected file and then reset its own value to allow for re-uploading the same file.
-
--   **Step 2.2: Create the `ColumnMappingModal` Component**
-    -   **File Creation:** Create a new component file at `ui/src/components/ColumnMappingModal.tsx`.
-    -   **Props Interface:** Define the component's props. It must accept:
-        -   `isOpen`: A boolean to control the modal's visibility.
-        -   `onClose`: A callback function to handle closing the modal.
-        -   `fileHeaders`: An array of strings from the parsed uploaded file.
-        -   `targetFields`: An array of strings representing the valid fields the application can enrich.
-        -   `onConfirm`: A callback function that returns the user-defined mapping object.
-    -   **UI Layout:** The component should render a modal dialog that overlays the main UI. Inside, it should display a title, instructional text, and a scrollable list.
-    -   **Mapping UI:** For each header in the `fileHeaders` prop, render a row containing the header's name and a corresponding `<select>` dropdown menu.
-    -   **Dropdown Population:** Each dropdown should be populated with all available `targetFields`, plus a default "-- Ignore this column --" option.
-    -   **Smart Defaulting Logic:** Implement a `useEffect` hook that runs when the component receives `fileHeaders`. This hook should create an initial mapping state by attempting to find a "best-fit" match for each file header from the `targetFields` list (e.g., by case-insensitive comparison). This provides a smart default for the user.
-    -   **Action Buttons:** Include "Cancel" and "Confirm and Import" buttons. `Cancel` should trigger the `onClose` prop. `Confirm` should finalize the current mapping state and pass it to the `onConfirm` prop.
+- **Action:** Remove `localStorage` and unify the state.
+  - **Step 1:** Remove `localStorage` logic. In the `enrichedCells` `useState` declaration, remove the initializer that reads from `localStorage`. Also, delete the `useEffect` hook responsible for writing to `localStorage`.
+  - **Step 2:** Unify the React state. The separate `originalData`, `enrichedCells`, and computed `data` states are the source of the UI bugs. They will be replaced by a single state variable, `spreadsheetData`.
+    ```javascript
+    // Replace the multiple state variables with this single one
+    const [spreadsheetData, setSpreadsheetData] = useState<SpreadsheetData>(/* initial empty data */);
+    ```
+  - **Step 3:** Refactor all component functions (`handleCellUpdate`, `handleEnrichmentUpdate`, `handleConfirmMapping`, etc.) to read from and write to the single `spreadsheetData` state object.
+  - **Step 4:** Pass the `spreadsheetData` state directly to the `Spreadsheet` component as its `data` prop.
 
 ---
 
-## Phase 3: Application Logic and State Orchestration
+## 3. Objective 2: Enhance Query Generation System
 
-**Objective:** Integrate the new UI components and file-processing logic into the main application.
+### Problem Analysis
+The current query generation is too simplistic. It relies on the column header alone, which is insufficient for abstract concepts like "influence summary" or "strategic summary". The system needs to be taught *what these concepts mean*.
 
--   **Step 3.1: Update the Main `App` Component (`ui/src/App.tsx`)**
-    -   **Imports:** Import the new `ColumnMappingModal` component and the `papaparse` and `xlsx` libraries.
-    -   **Constants:** Define a constant array named `TARGET_FIELDS` that contains the canonical list of all fields the backend can process (e.g., 'name', 'specialty', 'email'). This list will be passed to the mapping modal.
-    -   **State Management:** Introduce new state variables to manage the mapping modal's visibility (`isMappingModalOpen`) and to temporarily store the parsed file's headers and data (`parsedInfo`).
+### Solution: Injecting Domain-Specific Intelligence into Query Prompts
 
--   **Step 3.2: Implement the `onFileSelect` Handler**
-    -   Create this function within `App.tsx`. It will be passed down to the `Header` component.
-    -   This function will use a `FileReader` to read the selected file's content.
-    -   It must differentiate between CSV and Excel files based on their file extension.
-    -   Use the appropriate library (`papaparse` or `xlsx`) to parse the file content into a structured format (an array of objects is preferred).
-    -   Upon successful parsing, update the `parsedInfo` state with the headers and data from the file, and set the state to open the `ColumnMappingModal`.
-    -   Implement robust error handling to catch parsing errors and display a user-friendly toast notification.
+The solution is to significantly enhance the `_get_field_specific_guidance` function in `backend/graph.py`. This function will provide the query-generating LLM with a rich, detailed definition, including keywords, synonyms, and examples for each complex field.
 
--   **Step 3.3: Implement the `handleConfirmMapping` Handler**
-    -   Create this function within `App.tsx`. It will be passed to the `ColumnMappingModal`.
-    -   This function receives the final mapping object from the modal.
-    -   It must then transform the data stored in the `parsedInfo` state into the `SpreadsheetData` format required by the main `Spreadsheet` component. This involves creating new `headers` and `rows` arrays according to the user's mapping.
-    -   After the transformation, update the application's primary `data` state with the new spreadsheet data, close the modal, and clear the temporary `parsedInfo` state.
+#### 3.1. Enhance Field-Specific Guidance (`backend/graph.py`)
 
--   **Step 3.4: Render the Modal**
-    -   In the JSX of the `App` component, conditionally render the `ColumnMappingModal` based on the `isMappingModalOpen` state variable. Ensure all required props (headers, target fields, callbacks, etc.) are passed to it.
+- **Action:** Update the `guidance` dictionary within the `_get_field_specific_guidance` function with the detailed instructions below. This will provide the LLM with the necessary context to generate truly intelligent queries.
+
+```python
+# This dictionary should be updated in backend/graph.py
+
+guidance = {
+    "email": """
+TARGET: Professional email address.
+KEYWORDS: email, contact, directory, staff, faculty, @.
+STRATEGY: Search for the person's name along with keywords like 'email' or 'contact'. Also check for common email formats like 'firstname.lastname@institution.edu'.
+""",
+    "phone": """
+TARGET: Professional phone number (office, clinic, or hospital).
+KEYWORDS: phone, telephone, office, clinic, contact, appointment, fax.
+STRATEGY: Search for the person's name and their institution along with keywords like 'office phone' or 'contact number'.
+""",
+    "specialty": """
+TARGET: The primary medical specialty.
+KEYWORDS: specialty, specializes in, department of, division of, board certified in, clinical focus.
+STRATEGY: Search for the surgeon's name along with their hospital and the keyword 'specialty'. The result should be a standard medical specialty (e.g., "Orthopedic Surgery", "Neurosurgery").
+""",
+    "subspecialty": """
+TARGET: The surgeon's specific area of clinical focus beyond their main specialty.
+KEYWORDS: subspecialty, focus area, fellowship trained in, clinical interests, specialized procedures, specific conditions (e.g., "pancreatic cancer", "spinal deformities").
+EXAMPLES: A "General Surgery" specialty might have a subspecialty of "Surgical Oncology". An "Orthopedic Surgery" specialty might have a subspecialty of "Joint Replacement".
+STRATEGY: Search for the surgeon's name and terms like "fellowship", "specializes in", or "clinical focus".
+""",
+    "credentials": """
+TARGET: All medical degrees, board certifications, and professional fellowships.
+KEYWORDS: MD, DO, PhD, FACS (Fellow, American College of Surgeons), FRCS (Fellow, Royal College of Surgeons), board certified, residency, fellowship, medical school, education.
+STRATEGY: Search for the surgeon's name along with terms like "credentials", "education", or "board certified".
+""",
+    "linkedin_url": """
+TARGET: The URL of the surgeon's professional LinkedIn profile.
+KEYWORDS: site:linkedin.com, LinkedIn profile, professional network.
+STRATEGY: Perform a site-specific search on LinkedIn for the surgeon's name and their institution.
+""",
+    "influence_summary": """
+TARGET: A summary of the surgeon's academic and professional influence.
+KEYWORDS: publications, citations, h-index, research, clinical trials, grants, awards, keynote speaker, conference presentation, editorial board, society leadership.
+METRICS: Look for publication counts ("100+ publications"), citation metrics ("cited X times"), h-index values, and grant funding (e.g., "NIH R01 grant").
+ROLES: Department Chair, Program Director, President of a medical society (e.g., "President of the American College of Surgeons"), journal editor.
+STRATEGY: Generate a query that combines the surgeon's name with several of the keywords and roles above to find evidence of their academic and professional impact.
+""",
+    "strategic_summary": """
+TARGET: A summary of the surgeon's strategic value and role within their institution and the industry.
+KEYWORDS: leadership, director, chief, chair, board member, committee, advisory board, consultant, key opinion leader (KOL), industry collaboration, venture capital, startup, founder.
+ROLES: Chief of Surgery, Hospital Board Member, Medical Director, Committee Chair (e.g., "Chair of the Quality and Safety Committee"), consultant for medical device companies, scientific advisor.
+STRATEGY: Generate a query that looks for the surgeon's name in conjunction with leadership titles and business-oriented keywords to assess their institutional and commercial influence.
+""",
+    "additional_contacts": """
+TARGET: Alternative contact points like an assistant, office manager, or department coordinator.
+KEYWORDS: assistant, coordinator, scheduler, department contact, office manager, administrative assistant.
+STRATEGY: Search for the surgeon's name or their department name along with keywords like "administrative assistant" or "office contact".
+"""
+}
+```
+
+#### 3.2. Update the Main Query Prompt (`backend/graph.py`)
+
+- **Action:** With the guidance function enhanced, update the main query generation prompt in `_generate_intelligent_query_with_llm` to use this new context effectively. This prompt structure encourages the LLM to create a single, powerful query with a fallback mechanism.
+
+- **New Prompt Template:**
+
+```python
+query_prompt = f"""
+Generate ONE single, precise, and efficient web search query to find the **{state.target_field}** for the medical professional described below.
+
+**PERSON DETAILS:**
+{full_context}
+
+**SEARCH GOAL & CONTEXT:**
+{self._get_field_specific_guidance(state.target_field)}
+
+**QUERY CONSTRUCTION RULES:**
+1.  **Create a Multi-Part Query:** Use boolean operators (`OR`) and parentheses `()` to create a query with a primary and a secondary search strategy in a single line.
+2.  **Primary Search (Person-Specific):** The first part of the query should be highly specific. Combine the person's full name (in quotes) with the most relevant keywords from the "SEARCH GOAL & CONTEXT" section.
+3.  **Secondary Search (Institution-Specific):** The second part, connected by `OR`, should be a fallback to search for the information at their primary institution. Combine the institution's name with more general keywords related to the search goal.
+4.  **Example Query Structure:** `("Surgeon Name" + specific keywords) OR ("Hospital Name" + general keywords)`
+5.  **Be Efficient:** Your goal is to create the single best query string that has the highest probability of finding the correct information in one search.
+
+Return only the single, complete search query string and nothing else.
+"""
+```

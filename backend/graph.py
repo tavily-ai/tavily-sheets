@@ -2,15 +2,12 @@ import asyncio
 import logging
 import os
 import json
+import time
+import uuid
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field, asdict
 from datetime import datetime
 from typing import Dict, List, Optional, Union
-import os
-import asyncio
-import logging
-import time
-import uuid
 from functools import wraps
 
 from dotenv import load_dotenv
@@ -21,80 +18,39 @@ from aiolimiter import AsyncLimiter
 from cachetools import TTLCache
 import threading
 
+# Import our simple extraction system
+from .smart_extractor import SmartFieldExtractor
+
+# Initialize extractor
+smart_extractor = SmartFieldExtractor()
+
 # Configure logging
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 load_dotenv()
 
-# Global rate limiter and cache - VERY conservative to protect credits
-_tavily_rate_limiter = AsyncLimiter(10, 60)  # Only 10 requests per minute (was 100)
-_tavily_semaphore = asyncio.Semaphore(2)  # Max 2 concurrent requests (was 8)
+# Global rate limiter, cache, and circuit breaker
+_tavily_rate_limiter = AsyncLimiter(80, 60)  # 80 requests per minute (leaving buffer from 100)
+_tavily_semaphore = asyncio.Semaphore(3)  # Max 3 concurrent requests to match batch size
 _enrichment_cache = TTLCache(maxsize=1000, ttl=900)  # 15-minute TTL cache
 _cache_lock = threading.RLock()
 
-# Data persistence settings
-PERSISTENCE_DIR = "data"
-RESULTS_FILE = os.path.join(PERSISTENCE_DIR, "enrichment_results.json")
+# Circuit breaker state
+class CircuitBreakerState:
+    def __init__(self):
+        self.failure_count = 0
+        self.last_failure_time = 0
+        self.state = "CLOSED"  # CLOSED, OPEN, HALF_OPEN
+        self.failure_threshold = 5
+        self.recovery_timeout = 60  # seconds
+        self.success_threshold = 2  # successes needed to close circuit
+        self.consecutive_successes = 0
 
-def ensure_persistence_dir():
-    """Ensure the persistence directory exists"""
-    if not os.path.exists(PERSISTENCE_DIR):
-        os.makedirs(PERSISTENCE_DIR)
+_circuit_breaker = CircuitBreakerState()
 
-def save_enrichment_result(name: str, field: str, result: dict):
-    """Save enrichment result to persistent storage"""
-    try:
-        ensure_persistence_dir()
-        
-        # Load existing results
-        all_results = {}
-        if os.path.exists(RESULTS_FILE):
-            with open(RESULTS_FILE, 'r', encoding='utf-8') as f:
-                all_results = json.load(f)
-        
-        # Create key for this person
-        person_key = name.strip()
-        if person_key not in all_results:
-            all_results[person_key] = {}
-        
-        # Save the result with timestamp
-        all_results[person_key][field] = {
-            'answer': result.get('answer', ''),
-            'sources': result.get('sources', []),
-            'timestamp': datetime.now().isoformat(),
-            'search_strategy': result.get('search_strategy', ''),
-            'credits_used': result.get('credits_used', 0)
-        }
-        
-        # Save back to file
-        with open(RESULTS_FILE, 'w', encoding='utf-8') as f:
-            json.dump(all_results, f, indent=2, ensure_ascii=False)
-            
-        logger.info(f"Saved enrichment result for {name} - {field}")
-        
-    except Exception as e:
-        logger.error(f"Error saving enrichment result: {e}")
-
-def load_enrichment_result(name: str, field: str) -> Optional[dict]:
-    """Load enrichment result from persistent storage"""
-    try:
-        if not os.path.exists(RESULTS_FILE):
-            return None
-            
-        with open(RESULTS_FILE, 'r', encoding='utf-8') as f:
-            all_results = json.load(f)
-            
-        person_key = name.strip()
-        if person_key in all_results and field in all_results[person_key]:
-            result = all_results[person_key][field]
-            logger.info(f"Loaded cached result for {name} - {field}")
-            return result
-            
-    except Exception as e:
-        logger.error(f"Error loading enrichment result: {e}")
-    
-    return None
+# Note: Removed file persistence to make backend stateless between application runs.
+# The in-memory TTLCache (_enrichment_cache) is kept for de-duplication within a single session.
 
 # Global trace context
 _trace_context = {}
@@ -105,21 +61,31 @@ def get_trace_id() -> str:
 
 async def _tavily_wrapper(tavily_client, operation: str, **kwargs):
     """
-    Centralized wrapper for all Tavily API calls with rate limiting, 
-    retry logic, and telemetry.
+    Enhanced Tavily API wrapper with circuit breaker, rate limiting, and retry logic
     """
     trace_id = get_trace_id()
     start_time = time.time()
+    
+    # Circuit breaker check
+    current_time = time.time()
+    if _circuit_breaker.state == "OPEN":
+        if current_time - _circuit_breaker.last_failure_time > _circuit_breaker.recovery_timeout:
+            _circuit_breaker.state = "HALF_OPEN"
+            _circuit_breaker.consecutive_successes = 0
+            logger.info(f"[{trace_id}] Circuit breaker moving to HALF_OPEN state")
+        else:
+            logger.warning(f"[{trace_id}] Circuit breaker is OPEN - failing fast")
+            raise Exception("Circuit breaker is OPEN - Tavily API temporarily unavailable")
     
     # Rate limiting
     async with _tavily_rate_limiter:
         async with _tavily_semaphore:
             retry_count = 0
-            max_retries = 3
+            max_retries = 3 if _circuit_breaker.state != "HALF_OPEN" else 1
             
             while retry_count < max_retries:
                 try:
-                    logger.info(f"[{trace_id}] Executing Tavily {operation} (attempt {retry_count + 1})")
+                    logger.info(f"[{trace_id}] Executing Tavily {operation} (attempt {retry_count + 1}) - Circuit: {_circuit_breaker.state}")
                     
                     if operation == "search":
                         result = await asyncio.to_thread(
@@ -131,11 +97,34 @@ async def _tavily_wrapper(tavily_client, operation: str, **kwargs):
                     elapsed = time.time() - start_time
                     logger.info(f"[{trace_id}] Tavily {operation} completed in {elapsed:.2f}s")
                     
+                    # Success - update circuit breaker state
+                    if _circuit_breaker.state == "HALF_OPEN":
+                        _circuit_breaker.consecutive_successes += 1
+                        if _circuit_breaker.consecutive_successes >= _circuit_breaker.success_threshold:
+                            _circuit_breaker.state = "CLOSED"
+                            _circuit_breaker.failure_count = 0
+                            logger.info(f"[{trace_id}] Circuit breaker moved to CLOSED state")
+                    elif _circuit_breaker.state == "CLOSED":
+                        _circuit_breaker.failure_count = max(0, _circuit_breaker.failure_count - 1)
+                    
                     return result
                     
                 except Exception as e:
                     retry_count += 1
                     elapsed = time.time() - start_time
+                    
+                    # Update circuit breaker on failure
+                    _circuit_breaker.failure_count += 1
+                    _circuit_breaker.last_failure_time = current_time
+                    
+                    # Open circuit if threshold exceeded
+                    if (_circuit_breaker.state == "CLOSED" and 
+                        _circuit_breaker.failure_count >= _circuit_breaker.failure_threshold):
+                        _circuit_breaker.state = "OPEN"
+                        logger.error(f"[{trace_id}] Circuit breaker opened due to {_circuit_breaker.failure_count} failures")
+                    elif _circuit_breaker.state == "HALF_OPEN":
+                        _circuit_breaker.state = "OPEN"
+                        logger.error(f"[{trace_id}] Circuit breaker reopened after failure in HALF_OPEN state")
                     
                     # Don't retry on auth errors (4xx)
                     if "401" in str(e) or "403" in str(e) or "api_key" in str(e).lower():
@@ -146,41 +135,13 @@ async def _tavily_wrapper(tavily_client, operation: str, **kwargs):
                         logger.error(f"[{trace_id}] Tavily {operation} failed after {max_retries} attempts: {str(e)}")
                         raise
                     
-                    # Exponential backoff with much longer delays to protect credits
-                    delay = (2 ** retry_count) * 5  # 5s, 10s, 20s delays
-                    logger.warning(f"[{trace_id}] Tavily {operation} failed (attempt {retry_count}), retrying in {delay}s: {str(e)}")
+                    # Exponential backoff with jitter
+                    base_delay = (2 ** retry_count) * 5  # 5s, 10s, 20s base delays
+                    jitter = min(base_delay * 0.1, 2)  # Up to 10% jitter, max 2s
+                    delay = base_delay + (jitter * (0.5 - asyncio.get_event_loop().time() % 1))
+                    
+                    logger.warning(f"[{trace_id}] Tavily {operation} failed (attempt {retry_count}), retrying in {delay:.1f}s: {str(e)}")
                     await asyncio.sleep(delay)
-
-# Medical specialties for validation
-MEDICAL_SPECIALTIES = [
-    "Anesthesiology", "Cardiology", "Dermatology", "Emergency Medicine", 
-    "Family Medicine", "Gastroenterology", "General Surgery", "Internal Medicine",
-    "Neurology", "Neurosurgery", "Obstetrics and Gynecology", "Oncology",
-    "Ophthalmology", "Orthopedic Surgery", "Otolaryngology", "Pathology",
-    "Pediatrics", "Plastic Surgery", "Psychiatry", "Pulmonology",
-    "Radiology", "Rheumatology", "Urology", "Vascular Surgery",
-    "Cardiac Surgery", "Thoracic Surgery", "Transplant Surgery",
-    "Trauma Surgery", "Pediatric Surgery", "Interventional Cardiology"
-]
-
-"""
-TAVILY CREDIT OPTIMIZATION STRATEGY:
-
-Credit Usage:
-- Basic Search: 1 credit - for straightforward factual data (email, phone, credentials, specialty, linkedin)
-- Advanced Search: 2 credits - for complex analysis requiring quality content (influence_summary, strategic_summary, subspecialty)
-
-Field Classification:
-- BASIC (1 credit): email, phone, credentials, specialty, linkedin_url, additional_contacts
-  - Reason: These are typically found in standard bio/contact sections
-  - Strategy: Use basic search + Tavily's basic answer, minimal LLM processing
-  
-- ADVANCED (2 credits): influence_summary, strategic_summary, subspecialty
-  - Reason: Require deep content analysis, nuanced understanding
-  - Strategy: Advanced search + advanced answer + full LLM processing with appropriate complexity
-
-This approach can reduce credit usage by ~40% while maintaining quality for complex fields.
-"""
 
 # Medical specialties for validation
 MEDICAL_SPECIALTIES = [
@@ -195,7 +156,7 @@ MEDICAL_SPECIALTIES = [
 MODEL_COMPLEXITY = {
     "simple": "gemini-2.5-flash-lite",    # Basic extractions, credentials
     "medium": "gemini-2.5-flash",         # Professional summaries 
-    "complex": "gemini-2.5-flash-pro"     # Strategic analysis, influence assessment
+    "complex": "gemini-2.5-flash"           # Strategic analysis, influence assessment
 }
 
 
@@ -245,17 +206,47 @@ class VertexAIProvider(LLMProvider):
         if model_name != self.model_name:
             self.model_name = model_name
             
-        try:
-            response = await asyncio.to_thread(
-                lambda: self.client.models.generate_content(
-                    model=self.model_name,
-                    contents=prompt
+        max_retries = 3
+        base_delay = 2.0  # Start with 2 second delay
+        
+        for attempt in range(max_retries + 1):
+            try:
+                response = await asyncio.to_thread(
+                    lambda: self.client.models.generate_content(
+                        model=self.model_name,
+                        contents=prompt
+                    )
                 )
-            )
-            return response.text
-        except Exception as e:
-            logger.error(f"Vertex AI generation failed: {e}")
-            raise
+                return response.text
+                
+            except Exception as e:
+                error_str = str(e)
+                
+                # Check for rate limiting (429 or RESOURCE_EXHAUSTED)
+                if "429" in error_str or "RESOURCE_EXHAUSTED" in error_str:
+                    if attempt < max_retries:
+                        # Exponential backoff with jitter for rate limiting
+                        delay = base_delay * (2 ** attempt) + (0.5 * attempt)
+                        logger.warning(f"Vertex AI rate limited (attempt {attempt + 1}), retrying in {delay:.1f}s")
+                        await asyncio.sleep(delay)
+                        continue
+                    else:
+                        logger.error(f"Vertex AI rate limiting persisted after {max_retries} retries")
+                        raise Exception("Rate limiting error - please try again later")
+                else:
+                    # For other errors, fail immediately
+                    logger.error(f"Vertex AI generation failed: {e}")
+                    raise
+    
+    def create_lightweight_version(self, model_name: str = "gemini-2.5-flash-lite") -> 'VertexAIProvider':
+        """Create a lightweight version that reuses the same client infrastructure"""
+        lightweight = VertexAIProvider.__new__(VertexAIProvider)  # Create without calling __init__
+        lightweight.client = self.client  # Reuse existing client
+        lightweight.project_id = self.project_id
+        lightweight.location = self.location
+        lightweight.model_name = model_name
+        logger.info(f"Created lightweight Vertex AI provider with model {model_name} (reusing client)")
+        return lightweight
 
 
 @dataclass
@@ -316,29 +307,14 @@ class MedicalEnrichmentContext:
 class MedicalEnrichmentPipeline:
     """Specialized pipeline for medical professional data enrichment"""
     
-    def __init__(self, tavily_client, llm_provider: LLMProvider):
+    def __init__(self, tavily_client, llm_provider: LLMProvider, query_llm_provider: LLMProvider):
         self.tavily = tavily_client
         self.llm = llm_provider
-        
-        # Create lightweight LLM for query generation (cheaper, faster)
-        if hasattr(llm_provider, 'project_id'):
-            self.query_llm = VertexAIProvider("gemini-2.5-flash-lite", llm_provider.project_id)
-        else:
-            self.query_llm = llm_provider  # Fallback to main LLM
+        self.query_llm = query_llm_provider
 
     async def search_medical_data(self, state: MedicalEnrichmentContext) -> MedicalEnrichmentContext:
-        """Search for medical professional data with simple, effective approach"""
+        """Search for medical professional data with fallback logic for emails"""
         try:
-            # Check for persistent cached result first
-            cached_result = load_enrichment_result(state.name, state.target_field)
-            if cached_result:
-                logger.info(f"Using persistent cached result for {state.name} - {state.target_field}")
-                state.answer = cached_result.get('answer', 'Information not found')
-                state.sources = cached_result.get('sources', [])
-                state.search_strategy = f"cached - {cached_result.get('search_strategy', 'unknown')}"
-                state.credits_used = 0  # No credits used for cached results
-                return state
-            
             # Build cache key that includes request-specific context to prevent cross-contamination
             cache_key = f"{state.name.strip()}:{state.target_field}:{state.hospital_name or 'no_hospital'}"
             
@@ -353,26 +329,12 @@ class MedicalEnrichmentPipeline:
                     state.search_strategy = f"cached - {cached_result['search_strategy']}"
                     return state
             
-            # Build intelligent, context-aware query
-            query = await self._build_simple_search_query(state)
-            search_config = self._get_search_config(state.target_field)
+            # Special handling for email field with fallback search
+            if state.target_field == "email":
+                return await self._search_with_email_fallback(state, cache_key)
             
-            logger.info(f"Searching for {state.target_field} with query: {query}")
-            
-            # Perform single search
-            result = await self._execute_search(query, search_config)
-            
-            logger.info(f"Tavily search completed for {state.name} (credits used: {search_config['credits']})")
-            
-            # Update state with results
-            state.search_result = result
-            state.credits_used += search_config['credits']
-            state.search_strategy = f"{search_config['search_depth']} ({search_config['reason']})"
-            
-            # Cache the result
-            await self._cache_result(cache_key, result, search_config, state.search_strategy)
-            
-            return state
+            # Standard single search for other fields
+            return await self._perform_single_search(state, cache_key)
             
         except Exception as e:
             logger.error(f"Error in medical search for {state.name}: {str(e)}")
@@ -380,8 +342,177 @@ class MedicalEnrichmentPipeline:
             state.enrichment_status.append(f"search_error:{datetime.now().isoformat()}:{str(e)}")
             return state
 
+    async def _search_with_email_fallback(self, state: MedicalEnrichmentContext, cache_key: str) -> MedicalEnrichmentContext:
+        """Perform primary search for email with fallback if needed"""
+        # Primary search - focused on direct contact
+        primary_query = await self._build_primary_email_query(state)
+        search_config = self._get_search_config("email")
+        
+        logger.info(f"Primary email search for {state.name}: {primary_query}")
+        
+        result = await self._execute_search(primary_query, search_config)
+        credits_used = search_config['credits']
+        strategy_parts = [f"primary-{search_config['search_depth']}"]
+        
+        # Check if primary search found useful email content
+        has_email_content = self._has_email_content(result)
+        
+        # Fallback search if primary didn't find email content
+        if not has_email_content:
+            fallback_query = await self._build_fallback_email_query(state)
+            logger.info(f"Fallback email search for {state.name}: {fallback_query}")
+            
+            fallback_result = await self._execute_search(fallback_query, search_config)
+            credits_used += search_config['credits']
+            strategy_parts.append(f"fallback-{search_config['search_depth']}")
+            
+            # Combine results, prioritizing fallback if it has better content
+            if self._has_email_content(fallback_result):
+                # Merge results with fallback taking priority
+                result = self._merge_search_results(fallback_result, result)
+            else:
+                # Keep primary results even if no email found
+                result = self._merge_search_results(result, fallback_result)
+        
+        # Update state
+        state.search_result = result
+        state.credits_used += credits_used
+        state.search_strategy = "+".join(strategy_parts)
+        
+        # Cache the combined result
+        await self._cache_result(cache_key, result, {"credits": credits_used}, state.search_strategy)
+        
+        logger.info(f"Email search completed for {state.name} (credits used: {credits_used})")
+        return state
+
+    async def _perform_single_search(self, state: MedicalEnrichmentContext, cache_key: str) -> MedicalEnrichmentContext:
+        """Perform standard single search for non-email fields"""
+        query = await self._build_simple_search_query(state)
+        search_config = self._get_search_config(state.target_field)
+        
+        logger.info(f"Searching for {state.target_field} with query: {query}")
+        
+        result = await self._execute_search(query, search_config)
+        
+        logger.info(f"Tavily search completed for {state.name} (credits used: {search_config['credits']})")
+        
+        # Update state with results
+        state.search_result = result
+        state.credits_used += search_config['credits']
+        state.search_strategy = f"{search_config['search_depth']} ({search_config['reason']})"
+        
+        # Cache the result
+        await self._cache_result(cache_key, result, search_config, state.search_strategy)
+        
+        return state
+
+    def _has_email_content(self, search_result: dict) -> bool:
+        """Check if search result contains email-related content"""
+        if not search_result or not search_result.get("results"):
+            return False
+        
+        # Check Tavily's answer for email patterns
+        answer = search_result.get("answer", "")
+        if "@" in answer and any(domain in answer.lower() for domain in [".com", ".org", ".edu", ".gov"]):
+            return True
+        
+        # Check results content for email patterns
+        email_indicators = ["@", "email", "contact", "reach", "mail"]
+        for result in search_result.get("results", []):
+            content = (result.get("content", "") + result.get("raw_content", "")).lower()
+            if "@" in content and any(indicator in content for indicator in email_indicators):
+                return True
+        
+        return False
+
+    def _merge_search_results(self, primary: dict, secondary: dict) -> dict:
+        """Merge two search results, prioritizing primary"""
+        if not secondary:
+            return primary
+        if not primary:
+            return secondary
+        
+        # Combine results while avoiding duplicates
+        merged_results = list(primary.get("results", []))
+        
+        for sec_result in secondary.get("results", []):
+            sec_url = sec_result.get("url", "")
+            if not any(res.get("url") == sec_url for res in merged_results):
+                merged_results.append(sec_result)
+        
+        # Prefer primary answer, fallback to secondary
+        answer = primary.get("answer") or secondary.get("answer", "")
+        
+        return {
+            "results": merged_results[:15],  # Keep reasonable limit
+            "answer": answer,
+            **{k: v for k, v in primary.items() if k not in ["results", "answer"]}
+        }
+
+    async def _build_primary_email_query(self, state: MedicalEnrichmentContext) -> str:
+        """Build focused query for direct email contact"""
+        name = state.name
+        hospital = state.hospital_name or ""
+        
+        query_parts = [f'"{name}" email address contact']
+        if hospital:
+            query_parts.append(f'"{hospital}"')
+        query_parts.extend(["doctor", "surgeon", "professional"])
+        
+        return " ".join(query_parts)
+
+    async def _build_fallback_email_query(self, state: MedicalEnrichmentContext) -> str:
+        """Build broader query for email with department/hospital contacts"""
+        name = state.name
+        hospital = state.hospital_name or ""
+        
+        # Include department/specialty info if available
+        specialty_info = ""
+        if state.all_context:
+            for key, value in state.all_context.items():
+                if key.lower() in ['specialty', 'department'] and value:
+                    specialty_info = str(value)
+                    break
+        
+        query_parts = [f'"{name}"']
+        if hospital:
+            query_parts.append(f'"{hospital}"')
+        if specialty_info:
+            query_parts.append(specialty_info)
+        query_parts.extend(["contact", "email", "directory", "department", "office"])
+        
+        return " ".join(query_parts)
+
+    async def _build_linkedin_query(self, state: MedicalEnrichmentContext) -> str:
+        """Build optimized LinkedIn search query - clean and targeted"""
+        name = state.name
+        
+        # Get specialty for better targeting, but keep it simple
+        specialty_word = ""
+        if state.all_context:
+            for key, value in state.all_context.items():
+                if key.lower() in ['specialty', 'department'] and value:
+                    # Use only the first meaningful word
+                    specialty_word = str(value).split()[0].lower()
+                    break
+        
+        # LinkedIn works best with: site restriction + name + medical identifiers
+        query_parts = [f'site:linkedin.com "{name}"']
+        query_parts.extend(["doctor", "MD"])
+        
+        # Add specialty if available and recognized
+        if specialty_word and specialty_word in ["orthopedic", "cardiac", "neuro", "plastic", "general"]:
+            query_parts.append(specialty_word)
+        
+        return " ".join(query_parts)
+
     async def _build_simple_search_query(self, state: MedicalEnrichmentContext) -> str:
-        """Use LLM to generate intelligent, context-aware search queries"""
+        """Route to optimized queries for specific fields, LLM for others"""
+        # Use optimized queries for fields with known search patterns
+        if state.target_field == "linkedin_url":
+            return await self._build_linkedin_query(state)
+        
+        # Use LLM for complex fields that benefit from intelligent query generation
         return await self._generate_intelligent_query_with_llm(state)
     
     async def _generate_intelligent_query_with_llm(self, state: MedicalEnrichmentContext) -> str:
@@ -410,27 +541,35 @@ class MedicalEnrichmentPipeline:
             
         full_context = "\n".join(context_parts)
         
-        query_prompt = f"""Generate ONE precise web search query to find {state.target_field} for this medical professional.
+        query_prompt = f"""You are an expert at creating search queries to find specific information about medical professionals. 
+Create ONE intelligent search query that will help find {state.target_field} for this person.
 
-PERSON DETAILS:
+PERSON CONTEXT:
 {full_context}
 
-SEARCH GOAL: Find their {state.target_field}
+SEARCH TARGET: {state.target_field}
 
 {self._get_field_specific_guidance(state.target_field)}
 
-RULES:
-1. Use the person's full name in quotes for precision
-2. Include hospital/institution if provided - critical for accuracy
-3. Use ALL relevant context details that help identify this specific person
-4. Add medical keywords to avoid non-medical results
-5. Make it specific enough to find the RIGHT person
-6. Keep it concise but comprehensive
+QUERY CREATION STRATEGY:
+1. Write a natural, conversational query - not just keywords
+2. Be specific about the person (use quotes around full name)
+3. Include hospital/institution for precision
+4. Ask a direct question that Tavily's LLM can answer
+5. For emails: "What is Dr [Name]'s email address at [Hospital]?" or "Contact email for [Name] at [Institution]"
+6. For complex fields: Frame as analytical questions that require understanding
 
-Return only the search query:"""
+EXAMPLES:
+- Email: "What is Dr Sarah Johnson's email address at Toronto General Hospital?"
+- Phone: "What is the office phone number for Dr Michael Chen at Vancouver General Hospital?"  
+- Influence: "What are Dr Lisa Wang's research contributions and academic influence in cardiology?"
+- Strategic: "What leadership positions does Dr Robert Kim hold at Mount Sinai Hospital?"
+
+Create ONE precise query that asks directly for the information needed:"""
 
         try:
             # Use lightweight model for query generation
+
             response = await self.query_llm.generate(query_prompt, complexity="simple")
             generated_query = response.strip()
             
@@ -439,6 +578,19 @@ Return only the search query:"""
                 generated_query = generated_query.split("Query:")[-1].strip()
             if generated_query.startswith('"') and generated_query.endswith('"'):
                 generated_query = generated_query[1:-1]
+            
+            # Ensure query doesn't exceed Tavily's 400 character limit
+            if len(generated_query) > 400:
+                logger.warning(f"Query too long ({len(generated_query)} chars), truncating for {state.name}")
+                # Smart truncation - keep name and essential parts
+                name_part = f'"{state.name}"'
+                field_part = state.target_field
+                remaining_chars = 400 - len(name_part) - len(field_part) - 20  # Buffer for connectors
+                
+                if state.hospital_name and len(state.hospital_name) < remaining_chars:
+                    generated_query = f'{name_part} {field_part} {state.hospital_name[:remaining_chars]}'
+                else:
+                    generated_query = f'{name_part} {field_part} research publications'
             
             logger.info(f"LLM generated query for {state.name} ({state.target_field}): {generated_query}")
             return generated_query
@@ -492,56 +644,115 @@ Return only the search query:"""
         return fallback_query
     
     def _get_field_specific_guidance(self, field: str) -> str:
-        """Get field-specific search guidance for more targeted queries"""
+        """Enhanced field-specific search guidance for intelligent query generation"""
         guidance = {
             "email": """
-TARGET: Professional email address (personal, clinic, hospital, or department)
-SEARCH FOR: Contact pages, staff directories, hospital listings, practice websites, "email" or "contact"
-KEYWORDS: email, contact, directory, staff, faculty""",
+TARGET: Any email address that can be used to reach this doctor professionally
+
+PRIORITY APPROACH:
+1st PREFERENCE: Doctor's personal professional email 
+2nd PREFERENCE: Department/specialty email if relevant to their practice
+3rd PREFERENCE: Hospital/clinic contact emails, personal emails if verifiably linked to the doctor
+
+SEARCH STRATEGY:
+- Primary search: Direct professional contact information
+- If no results: Broader search including department, personal, and hospital emails
+- Maximum 2 search attempts for email field only
+
+RELEVANCE CRITERIA:
+✓ ACCEPT: Any email that can reasonably be used to contact this specific doctor
+✓ ACCEPT: Department emails if they work in that department  
+✓ ACCEPT: Hospital emails if they're the doctor's official contact
+✓ ACCEPT: Personal emails if clearly belonging to the doctor
+✗ REJECT: Generic emails with no clear connection to the doctor
+
+
+QUERY CONSTRUCTION:
+- Use natural, direct questions about contact information
+- Be specific with full name and hospital context
+- Ask for any way to reach the doctor professionally""",
             
             "phone": """
-TARGET: Professional phone number (office, clinic, or hospital)
-SEARCH FOR: Practice listings, hospital directories, office contact information
-KEYWORDS: phone, telephone, office, clinic, contact, appointment""",
+TARGET: Professional phone number - office, clinic, department, or hospital
+SEARCH STRATEGY: Find ANY phone number for contacting this person professionally
+KEYWORDS: phone, telephone, office, clinic, contact, appointment, department
+QUERY EXAMPLES:
+- "Dr [Name] phone number [Hospital]"
+- "[Name] office phone [Location]"
+- "[Hospital] [Department] contact number"
+FALLBACK: Department or hospital main numbers are acceptable""",
             
             "specialty": """
-TARGET: Medical specialty and subspecialty
-SEARCH FOR: Department listings, medical credentials, hospital biographies, practice descriptions
-KEYWORDS: specialty, specializes in, department of, division of, board certified""",
+TARGET: Primary medical specialty
+SEARCH STRATEGY: Find the main medical specialty they practice
+KEYWORDS: specialty, specializes in, department of, division of, board certified, practice area
+QUERY EXAMPLES:
+- "Dr [Name] medical specialty [Hospital]"
+- "[Name] what kind of doctor [Location]"
+MEDICAL SPECIALTIES: Surgery, Internal Medicine, Pediatrics, Cardiology, Neurology, etc.""",
             
             "credentials": """
 TARGET: Medical degrees, certifications, board certifications
-SEARCH FOR: Education background, medical qualifications, certifications, CV/resume
-KEYWORDS: MD, DO, PhD, FACS, board certified, education, medical school, residency""",
+SEARCH STRATEGY: Find educational background and professional certifications
+KEYWORDS: MD, DO, PhD, FACS, board certified, education, medical school, residency, fellowship
+QUERY EXAMPLES:
+- "Dr [Name] credentials education [Hospital]"
+- "[Name] medical degree board certification"
+FORMATS: MD, DO, FACS, Board Certified in [Specialty]""",
             
             "linkedin_url": """
-TARGET: Professional LinkedIn profile
-SEARCH FOR: LinkedIn profile with medical/professional context
-KEYWORDS: site:linkedin.com, LinkedIn profile, professional network""",
+TARGET: Professional LinkedIn profile URL
+SEARCH STRATEGY: Find their LinkedIn profile with medical context
+KEYWORDS: site:linkedin.com, LinkedIn profile, professional network
+QUERY EXAMPLES:
+- "[Name] LinkedIn profile surgeon doctor [Hospital]"
+- "site:linkedin.com [Name] [Specialty] [Location]"
+VALIDATION: Ensure profile matches the medical professional""",
             
             "influence_summary": """
-TARGET: Research impact, publications, citations, leadership roles, recognition
-SEARCH FOR: Publication counts, h-index, citation metrics, research leadership, awards, editorial roles
-KEYWORDS: publications, citations, h-index, research, awards, editorial board, department chair, fellowship director
-SPECIFIC METRICS: Look for "100+ publications", "h-index", "cited X times", "impact factor", "research grants"
-ACADEMIC ROLES: Department head, program director, editorial board, society leadership""",
+TARGET: Research impact, academic influence, professional recognition
+SEARCH STRATEGY: Quantify their influence through publications, citations, leadership
+KEYWORDS: publications, citations, h-index, research, awards, editorial board, department chair
+METRICS TO FIND:
+- Publication count ("100+ publications", "published X papers")
+- Citation metrics ("cited X times", "h-index of Y")
+- Leadership roles ("department chair", "program director", "editorial board")
+- Awards and recognition ("best doctor", "top surgeon", "research awards")
+QUERY EXAMPLES:
+- "Dr [Name] publications citations research impact [Specialty]"
+- "[Name] awards recognition leadership [Hospital] [Specialty]"
+OUTPUT FORMAT: [Number] publications with [impact metrics]. [Leadership roles]. [Awards/recognition].""",
             
             "strategic_summary": """
-TARGET: Strategic value, network connections, decision-making influence, institutional roles
-SEARCH FOR: Leadership positions, committee memberships, advisory roles, industry connections
-KEYWORDS: chief, director, president, board member, committee chair, advisory, consultant, key opinion leader
-STRATEGIC ROLES: Hospital board, medical society leadership, advisory committees, consultant roles""",
+TARGET: Strategic value, decision-making authority, institutional influence
+SEARCH STRATEGY: Find leadership positions, budget authority, strategic roles
+KEYWORDS: chief, director, president, board member, committee chair, advisory, consultant
+POSITIONS TO FIND:
+- Executive roles ("Chief of Surgery", "Medical Director", "Department Head")
+- Board positions ("Hospital Board", "Medical Society Leadership")
+- Committee leadership ("Chair", "Committee Member", "Advisory Board")
+- Institutional influence ("Decision maker", "Budget authority")
+QUERY EXAMPLES:
+- "Dr [Name] leadership position director chief [Hospital]"
+- "[Name] board member committee chair [Institution]"
+OUTPUT FORMAT: [Title/Position] with authority over [scope]. [Key responsibilities]. [Strategic influence].""",
             
             "additional_contacts": """
-TARGET: Alternative contact methods, assistant contacts, department contacts
-SEARCH FOR: Office staff, administrative contacts, department phone/email, scheduling contacts
-KEYWORDS: assistant, coordinator, scheduler, department contact, office manager"""
+TARGET: Alternative contact methods - assistants, department contacts, scheduling
+SEARCH STRATEGY: Find supporting contacts and alternative ways to reach them
+KEYWORDS: assistant, coordinator, scheduler, department contact, office manager, secretary
+QUERY EXAMPLES:
+- "Dr [Name] assistant scheduler [Hospital]"
+- "[Hospital] [Department] contact staff directory"
+ACCEPTABLE: Office staff, department contacts, scheduling lines"""
         }
         
         return guidance.get(field, f"""
-TARGET: {field} information
-SEARCH FOR: Professional information related to {field}
-KEYWORDS: {field}, professional, medical""")
+TARGET: {field} information for medical professional
+SEARCH STRATEGY: Find professional information related to {field}
+KEYWORDS: {field}, professional, medical, doctor, surgeon
+QUERY EXAMPLE: "Dr [Name] {field} [Hospital] [Location]"
+""")
     
     
     async def _execute_search(self, query: str, search_config: dict):
@@ -577,127 +788,39 @@ KEYWORDS: {field}, professional, medical""")
 
     def _get_search_config(self, field: str) -> Dict:
         """
-        Determine optimal search configuration based on field requirements.
+        Optimized search configuration based on Tavily API documentation.
         
-        Credit optimization strategy (based on Tavily documentation):
-        - Basic (1 credit): Simple factual data, max_results ≤ 5 optimal, include_raw_content for extraction
-        - Advanced (2 credits): Complex analysis, chunks_per_source 1-3, include_raw_content + advanced answers
-        
-        Key optimizations:
-        - Explicitly set search_depth to prevent auto_parameters upgrading to advanced
-        - Use include_domains for targeted searches when beneficial
-        - Minimize max_results while maintaining quality
-        - Use include_answer strategically to reduce LLM processing
+        Key insights from Tavily docs:
+        - max_results can go up to 20 within same credit cost (1 or 2 credits based on search_depth)
+        - search_depth determines credit cost: basic=1, advanced=2
+        - include_answer="advanced" provides better LLM-generated responses 
+        - include_raw_content="markdown" gives structured content for extraction
+        - auto_parameters=False prevents unexpected credit usage
         """
         
-        # Fields that need ADVANCED search (2 credits) - require deep analysis and quality content
-        advanced_fields = {
-            "influence_summary": {
-                "search_depth": "advanced",
-                "max_results": 3,  # Reduced from 5 - advanced gets better quality per result
-                "include_raw_content": "markdown",  # More structured than True
-                "include_answer": "advanced",  # Detailed answer reduces LLM work
-                "chunks_per_source": 2,  # Reduced from 3 - still quality but less tokens
-                "auto_parameters": False,  # Prevent automatic upgrades
-                "credits": 2,
-                "reason": "Complex analysis of publications, citations, leadership roles"
-            },
-            "strategic_summary": {
-                "search_depth": "advanced", 
-                "max_results": 3,  # Reduced from 5
-                "include_raw_content": "markdown",
-                "include_answer": "advanced",
-                "chunks_per_source": 2,  # Focused chunks
-                "auto_parameters": False,
-                "credits": 2,
-                "reason": "Organizational impact analysis requires quality content extraction"
-            },
-            "subspecialty": {
-                "search_depth": "advanced",
-                "max_results": 3,  # Reduced from 4
-                "include_raw_content": "markdown",
-                "include_answer": "basic",  # Basic answer sufficient for subspecialty
-                "chunks_per_source": 2,
-                "auto_parameters": False,
-                "credits": 2,
-                "reason": "Subspecialties require nuanced understanding from quality sources"
-            }
-        }
-        
-        # Fields that work well with BASIC search (1 credit) - optimized for efficiency
-        basic_fields = {
-            "email": {
-                "search_depth": "basic",
-                "max_results": 10,  # Focused results for better quality
-                "include_raw_content": "text",
-                "include_answer": "basic",
-                "auto_parameters": False,
-                "credits": 1,
-                "reason": "Context-driven email search"
-            },
-            "phone": {
-                "search_depth": "basic",
-                "max_results": 8,
-                "include_raw_content": "text",
-                "include_answer": "basic",
-                "auto_parameters": False,
-                "credits": 1,
-                "reason": "Context-driven phone search"
-            },
-            "credentials": {
-                "search_depth": "basic",
-                "max_results": 3,  # Credentials may be in multiple places
-                "include_raw_content": "text",
-                "include_answer": "basic",
-                "auto_parameters": False,
-                "credits": 1,
-                "reason": "Medical credentials in bio sections"
-            },
-            "specialty": {
-                "search_depth": "basic",
-                "max_results": 5,  # Usually prominently displayed
-                "include_raw_content": "text",
-                "include_answer": "basic",
-                "auto_parameters": False,
-                "credits": 1,
-                "reason": "Primary specialty prominently listed"
-            },
-            "linkedin_url": {
-                "search_depth": "basic",
-                "max_results": 3,  # LinkedIn should be top result
-                "include_raw_content": False,  # URLs don't need content extraction
-                "include_answer": "basic",
-                "auto_parameters": False,
-                "credits": 1,
-                "reason": "Context-driven LinkedIn search"
-            },
-            "additional_contacts": {
-                "search_depth": "basic",
-                "max_results": 5,  # Increased for broader search
-                "include_raw_content": "text",
-                "include_answer": "basic",
-                "auto_parameters": False,
-                # Removed domain restrictions
-                "credits": 1,
-                "reason": "Comprehensive contact search across all sources"
-            }
-        }
-        
-        # Return appropriate configuration
-        if field in advanced_fields:
-            return advanced_fields[field]
-        elif field in basic_fields:
-            return basic_fields[field]
-        else:
-            # Default to basic for unknown fields to minimize costs
+        # Advanced search (2 credits) - for fields requiring deep analysis or comprehensive discovery
+        if field in ["email", "influence_summary", "strategic_summary"]:
             return {
-                "search_depth": "basic",
-                "max_results": 2,
-                "include_raw_content": "text",
-                "include_answer": "basic",
-                "auto_parameters": False,  # Critical: prevent auto-upgrade to advanced
+                "search_depth": "advanced",
+                "max_results": 15,  # Maximize results within 2-credit cost
+                "include_raw_content": "markdown",  # Structured content extraction
+                "include_answer": "advanced",  # Detailed LLM-generated answers
+                "chunks_per_source": 3,  # Maximum content chunks
+                "auto_parameters": False,  # Prevent unexpected upgrades
+                "credits": 2,
+                "reason": f"Advanced search for comprehensive {field} discovery"
+            }
+        
+        # Basic search (1 credit) - for straightforward factual information
+        else:
+            return {
+                "search_depth": "basic", 
+                "max_results": 12,  # Maximize results within 1-credit cost
+                "include_raw_content": "markdown",  # Simple text extraction sufficient
+                "include_answer": "basic",  # Quick LLM answers
+                "auto_parameters": False,  # Prevent auto-upgrade to advanced
                 "credits": 1,
-                "reason": "Unknown field - cost-efficient basic search"
+                "reason": f"Basic search for {field} information"
             }
 
     async def extract_field_data(self, state: MedicalEnrichmentContext) -> MedicalEnrichmentContext:
@@ -718,21 +841,21 @@ KEYWORDS: {field}, professional, medical""")
             if search_config["search_depth"] == "basic" and tavily_answer and len(tavily_answer.strip()) > 10:
                 # Simple fields can often use Tavily's answer directly with light validation
                 if state.target_field in ["email", "phone", "credentials", "specialty", "linkedin_url"]:
-                    validated_answer = self._validate_field_data(state.target_field, tavily_answer)
+                    # Create context for smart extraction
+                    validation_context = {
+                        'doctor_name': state.name,
+                        'tavily_answer': tavily_answer,
+                        'search_content': state.search_result.get('raw_content', ''),
+                        'search_results': state.search_result.get('results', []),
+                        'source_quality': state.search_result.get('source_quality', {}),
+                        'direct_answer': True
+                    }
+                    validated_answer = self._validate_and_extract_field_data(state.target_field, tavily_answer, validation_context)
                     if validated_answer != "Information not found":
                         logger.info(f"Using Tavily answer directly for {state.target_field}: {validated_answer}")
                         state.answer = validated_answer
                         self._update_sources(state)
                         state.last_updated = datetime.now()
-                        
-                        # Save result to persistent storage
-                        result_data = {
-                            'answer': state.answer,
-                            'sources': state.sources,
-                            'search_strategy': state.search_strategy,
-                            'credits_used': state.credits_used
-                        }
-                        save_enrichment_result(state.name, state.target_field, result_data)
                         
                         return state
             
@@ -751,10 +874,44 @@ KEYWORDS: {field}, professional, medical""")
             
             logger.info(f"Extracting {state.target_field} for {state.name} using {complexity} complexity")
             
+            # Add debug logging for LinkedIn URL extraction
+            if state.target_field == "linkedin_url":
+                logger.info(f"LinkedIn extraction debug - Tavily Answer: '{tavily_answer[:200]}...'")
+                logger.info(f"LinkedIn extraction debug - Content length: {len(content)} chars")
+
             answer = await self.llm.generate(prompt, complexity=complexity)
             
-            # Validate and clean the answer
-            validated_answer = self._validate_field_data(state.target_field, answer)
+            # Add debug logging for raw GenAI response
+            if state.target_field == "linkedin_url":
+                logger.info(f"LinkedIn extraction debug - Raw GenAI response: '{answer}'")
+
+            # Enhanced context for smart extraction
+            if state.search_result and state.search_result.get("results"):
+                search_results = state.search_result["results"]
+                # Add context about source quality and relevance
+                source_quality = self._assess_source_quality(search_results)
+                extraction_context = {
+                    'doctor_name': state.name,
+                    'tavily_answer': tavily_answer,
+                    'search_content': content,
+                    'search_results': search_results,
+                    'source_quality': source_quality,
+                    'num_sources': len(search_results),
+                    'has_linkedin_mentions': any('linkedin' in str(result).lower() for result in search_results),
+                    'has_email_mentions': any('@' in str(result) for result in search_results)
+                }
+            else:
+                extraction_context = {
+                    'doctor_name': state.name,
+                    'tavily_answer': tavily_answer,
+                    'search_content': content,
+                    'search_results': [],
+                    'source_quality': {}
+                }
+                
+            validated_answer = self._validate_and_extract_field_data(
+                state.target_field, answer, extraction_context
+            )
             
             logger.info(f"Extracted {state.target_field}: {validated_answer}")
             
@@ -762,15 +919,6 @@ KEYWORDS: {field}, professional, medical""")
             self._update_sources(state)
             state.last_updated = datetime.now()
             state.enrichment_status.append(f"extract_success:{datetime.now().isoformat()}:{complexity}")
-            
-            # Save result to persistent storage
-            result_data = {
-                'answer': state.answer,
-                'sources': state.sources,
-                'search_strategy': state.search_strategy,
-                'credits_used': state.credits_used
-            }
-            save_enrichment_result(state.name, state.target_field, result_data)
             
             return state
             
@@ -843,19 +991,38 @@ KEYWORDS: {field}, professional, medical""")
         content_focused = content[:2500] if len(content) > 2500 else content
         
         prompts = {
-            "email": f"""Find the email address for {base_context}
+            "email": f"""TASK: Extract professional email address for {base_context}
 
-Search this content for email addresses:
+PRIORITY SOURCE - Tavily Answer: "{tavily_answer}"
 
-Tavily Answer: {tavily_answer}
+BACKUP CONTENT (only if Tavily Answer is insufficient):
+{content_focused}
 
-Additional Content: {content_focused}
+EXTRACTION INSTRUCTIONS:
+You are an expert at finding professional contact information. Find any valid email address for this medical professional.
 
-Instructions:
-- Look for any email address (personal, department, clinic, office)
-- If no direct email found, look for clinic/department/hospital emails
-- Extract just the email address, nothing else
-- If truly no email exists anywhere, return "Information not found"
+WHAT TO LOOK FOR:
+1. Professional emails: firstname.lastname@hospital.com, doctor@clinic.org
+2. Institutional emails: name@university.edu, contact@medicalcenter.org  
+3. Practice emails: info@surgicalpractice.com (if associated with this doctor)
+4. Personal emails: name@gmail.com (if clearly belonging to this doctor)
+
+ACCEPTANCE CRITERIA:
+✓ Direct professional emails (name@hospital.com)
+✓ Department emails if they work there (surgery@hospital.com)
+✓ Practice/clinic contact emails  
+✓ Personal emails if clearly linked to the doctor
+✓ Any valid email that can reach this specific doctor
+
+REJECTION CRITERIA:
+✗ Automated emails (noreply@, no-reply@, system@)
+✗ Generic emails not connected to this person
+✗ Broken or incomplete email addresses
+
+RESPONSE GUIDELINES:
+- If valid email found: Return ONLY the email address
+- If no email available: Say "No email address found"
+- If uncertain: Say "Email address not available"
 
 Email address:""",
 
@@ -900,14 +1067,28 @@ PRIORITY SOURCE - Tavily Answer: "{tavily_answer}"
 BACKUP CONTENT (only if Tavily Answer is insufficient):
 {content_focused}
 
-EXTRACTION RULES:
-1. First, extract credentials from Tavily Answer (MD, DO, FACS, board certifications, etc.)
-2. Look for patterns: "Dr. Name, MD", "John Smith, MD, FACS", board certifications
-3. Include degrees and certifications, separate with commas
-4. Return ONLY credentials - no explanations
-5. Standard format: "MD, FACS" or "MD, FACS, Board Certified"
+EXTRACTION INSTRUCTIONS:
+You are an expert at identifying medical credentials. Find the degrees, certifications, and qualifications for this medical professional.
 
-RETURN EXACTLY:""",
+WHAT TO LOOK FOR:
+1. Medical degrees: MD, DO, PhD, DDS, DVM, PharmD
+2. Board certifications: FACS, FRCSC, FRCS, FACC, FACP, FACEP, FAAOS
+3. Speciality certifications: Board Certified in [Specialty]
+4. Fellowship designations: Fellow of [Organization]
+5. Academic credentials: Professor, Associate Professor, etc.
+
+EXTRACTION PATTERNS:
+- Look for: "Dr. Name, MD, FACS" or "John Smith, MD, FACS, Board Certified"
+- Include degrees AND certifications: "MD, FACS" or "DO, Board Certified in Surgery"
+- Separate multiple credentials with commas
+
+RESPONSE GUIDELINES:
+- If credentials found: Return in format "MD, FACS" or "MD, FACS, Board Certified"
+- Include only verified credentials from reliable sources
+- If no clear credentials: Say "Credentials not available"
+- DO NOT make up or assume credentials
+
+Credentials:""",
 
             "linkedin_url": f"""TASK: Extract LinkedIn profile URL for {base_context}
 
@@ -916,14 +1097,27 @@ PRIORITY SOURCE - Tavily Answer: "{tavily_answer}"
 BACKUP CONTENT (only if Tavily Answer is insufficient):
 {content_focused}
 
-EXTRACTION RULES:
-1. First, look for LinkedIn URL in Tavily Answer
-2. Search for patterns like "linkedin.com/in/name" or "linkedin.com/pub/name"
-3. Verify the profile matches the surgeon's name
-4. Return ONLY the complete LinkedIn URL - no explanations
-5. If multiple profiles, return the most complete/professional one
+EXTRACTION INSTRUCTIONS:
+You are an expert at extracting LinkedIn profile URLs. Your task is to find the correct LinkedIn profile for this medical professional.
 
-RETURN EXACTLY:""",
+WHAT TO LOOK FOR:
+1. Complete LinkedIn URLs: https://linkedin.com/in/firstname-lastname-md, https://www.linkedin.com/pub/name
+2. Profile URLs matching the surgeon's name and medical background
+3. URLs from reliable sources in search results
+
+RESPONSE GUIDELINES:
+- If you find a valid LinkedIn URL: Return ONLY the complete URL
+- If clearly no profile exists: Say "No LinkedIn profile found"  
+- If uncertain or information is unclear: Say "LinkedIn profile not available"
+- DO NOT make up URLs or return partial/broken links
+- DO NOT return generic responses like "Information not found"
+
+VALIDATION:
+- Verify the profile name reasonably matches the surgeon
+- Prefer complete https:// URLs over partial ones
+- Choose the most professional/complete profile if multiple found
+
+LinkedIn URL:""",
 
             "influence_summary": f"""TASK: Create influence summary for {base_context}
 
@@ -998,57 +1192,35 @@ BACKUP CONTENT: {content_focused}
 Extract the requested information, prioritizing the Tavily Answer.
 RETURN EXACTLY:""")
 
-    def _validate_field_data(self, field: str, data: str) -> str:
-        """Validate and clean extracted field data with flexible acceptance criteria"""
-        if not data or data.strip().lower() in ["information not found", "not found", "n/a", "", "none", "null"]:
-            return "Information not found"
-        
-        cleaned = data.strip()
-        
-        # Field-specific validation with enhanced flexibility
-        if field == "email":
-            return self._validate_email_data(cleaned)
-                
-        elif field == "phone":
-            # Basic phone number validation
-            import re
-            phone_pattern = r'[\(\)\s\-\.\+\d]+'
-            if re.search(r'\d', cleaned):  # Must contain at least one digit
-                return cleaned
-            return "Information not found"
-            
-        elif field == "specialty":
-            # Find closest match in MEDICAL_SPECIALTIES
-            for specialty in MEDICAL_SPECIALTIES:
-                if specialty.lower() in cleaned.lower() or cleaned.lower() in specialty.lower():
-                    return specialty
-                    
-        elif field == "linkedin_url":
-            if "linkedin.com" in cleaned.lower():
-                # Extract URL if it's in longer text
-                import re
-                url_pattern = r'https?://[^\s<>"]+|www\.[^\s<>"]+'
-                urls = re.findall(url_pattern, cleaned)
-                linkedin_urls = [url for url in urls if "linkedin.com" in url.lower()]
-                if linkedin_urls:
-                    return linkedin_urls[0]
-                return cleaned
-            return "Information not found"
-        
-        return cleaned
+    def _assess_source_quality(self, search_results: List[dict]) -> dict:
+        """Simple source quality assessment."""
+        return {
+            'has_results': len(search_results) > 0,
+            'result_count': len(search_results)
+        }
 
-    def _validate_email_data(self, data: str) -> str:
-        """Simple email validation that extracts clean email addresses"""
-        import re
-        
-        # First try to extract standard email addresses
-        email_pattern = r'\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Z|a-z]{2,}\b'
-        emails = re.findall(email_pattern, data)
-        if emails:
-            return emails[0]  # Return first valid email found
-        
-        # If no email found, return not found
-        return "Information not found"
+    def _validate_and_extract_field_data(self, field: str, raw_response: str, context: dict = None) -> str:
+        """
+        Clean, working field data extraction using the smart extractor.
+        This replaces the old complex validation with a simple, effective approach.
+        """
+        try:
+            # Use the new smart field extractor
+            context_dict = context or {}
+            
+            result = smart_extractor.extract_field_data(field, raw_response, context_dict)
+            
+            # Log the result
+            if result != "Information not found":
+                logger.info(f"{field.capitalize()} extraction successful: {result}")
+            else:
+                logger.info(f"{field.capitalize()} extraction failed - Raw response: '{raw_response}'")
+            
+            return result
+                
+        except Exception as e:
+            logger.error(f"Error in field validation for {field}: {str(e)}")
+            return "Information not found"
 
     def build_graph(self):
         """Build and compile the medical enrichment graph"""
@@ -1070,7 +1242,8 @@ async def enrich_medical_field(
     phone: Optional[str] = None,
     all_context: Optional[Dict[str, str]] = None,
     tavily_client=None,
-    llm_provider: LLMProvider = None
+    llm_provider: LLMProvider = None,
+    query_llm_provider: LLMProvider = None
 ) -> MedicalEnrichmentContext:
     """
     Enrich a specific field for a medical professional.
@@ -1082,7 +1255,8 @@ async def enrich_medical_field(
         address: Physical address
         phone: Contact phone
         tavily_client: Tavily search client
-        llm_provider: LLM provider instance
+        llm_provider: LLM provider instance for content extraction
+        query_llm_provider: Lightweight LLM provider instance for query generation
         
     Returns:
         MedicalEnrichmentContext with enriched data and metadata
@@ -1100,7 +1274,7 @@ async def enrich_medical_field(
         
         logger.info(f"Starting medical enrichment for {name}, field: {target_field}")
         
-        pipeline = MedicalEnrichmentPipeline(tavily_client, llm_provider)
+        pipeline = MedicalEnrichmentPipeline(tavily_client, llm_provider, query_llm_provider)
         
         initial_context = MedicalEnrichmentContext(
             name=name,
