@@ -5,7 +5,7 @@ import React, {
   SetStateAction,
   Dispatch,
 } from "react";
-import { SpreadsheetData, Position } from "../types";
+import { SpreadsheetData, Position, ColumnConfig } from "../types";
 import { Sparkles, Trash2, Pencil, Plus } from "lucide-react";
 import { motion } from "framer-motion";
 import { ToastDetail } from "../App";
@@ -21,6 +21,18 @@ interface SpreadsheetProps {
 
 // Add API URL from environment
 const API_URL = import.meta.env.VITE_API_URL || "http://localhost:8000";
+
+// Add at the top of the Spreadsheet component
+const ENRICHMENT_TYPES = [
+  { value: "predefined", label: "Predefined (e.g. Find Website)" },
+  { value: "ai_agent", label: "AI Agent (custom chain)" },
+];
+
+// Helper to create a default column config
+const defaultColumnConfig = (name = ""): ColumnConfig => ({
+  name,
+  enrichmentType: "predefined",
+});
 
 const Spreadsheet: React.FC<SpreadsheetProps> = ({
   setToast,
@@ -39,6 +51,11 @@ const Spreadsheet: React.FC<SpreadsheetProps> = ({
     col: number;
   } | null>(null);
 
+  // Modal state for column config
+  const [configModalOpen, setConfigModalOpen] = useState(false);
+  const [configModalIndex, setConfigModalIndex] = useState<number | null>(null);
+  const [configForm, setConfigForm] = useState<ColumnConfig>({ name: "" });
+
   // Add a new row
   const addRow = () => {
     const newRows = [...data.rows];
@@ -46,11 +63,10 @@ const Spreadsheet: React.FC<SpreadsheetProps> = ({
     setData({ ...data, rows: newRows });
   };
 
-  // Add a new column
+  // Update addColumn to use defaultColumnConfig
   const addColumn = () => {
     if (data.headers.length >= 5) return; // Limit to 5 columns
-
-    const newHeaders = [...data.headers, ""];
+    const newHeaders = [...data.headers, defaultColumnConfig()];
     const newRows = data.rows.map((row) => [...row, { value: "" }]);
     setData({ headers: newHeaders, rows: newRows });
   };
@@ -117,7 +133,8 @@ const Spreadsheet: React.FC<SpreadsheetProps> = ({
 
   // Enrichment function that calls our API
   const enrichColumn = async (colIndex: number) => {
-    if (!data.headers[colIndex]) {
+    const colConfig = data.headers[colIndex];
+    if (!colConfig.name) {
       setToast({
         message: "Please set the column header",
         type: "error",
@@ -157,13 +174,44 @@ const Spreadsheet: React.FC<SpreadsheetProps> = ({
       // Get context from other columns
       const contextValues: Record<string, string> = {};
       data.headers.forEach((header, idx) => {
-        if (idx !== colIndex && header.trim() !== "") {
-          contextValues[header] = data.rows[0][idx].value;
+        const headerName = header?.name;
+        if (
+          idx !== colIndex &&
+          typeof headerName === "string" &&
+          headerName.trim() !== ""
+        ) {
+          contextValues[headerName] = data.rows[0][idx].value;
         }
       });
 
       // Extract all target values from first column
       const targetValues = data.rows.map((row) => row[0].value);
+
+      // Prepare payload for each row
+      const rowsPayload = data.rows.map((row, rowIndex) => {
+        // Default: use entity from first column
+        let input_source_type = "ENTITY";
+        let input_data = row[0].value;
+        let custom_prompt = undefined;
+        if (colConfig.enrichmentType === "ai_agent") {
+          input_source_type = "TEXT_FROM_COLUMN";
+          if (
+            typeof colConfig.mappedColumnIndex === "number" &&
+            data.headers[colConfig.mappedColumnIndex]
+          ) {
+            input_data = row[colConfig.mappedColumnIndex].value;
+          }
+          custom_prompt = colConfig.customPrompt;
+        }
+        return {
+          column_name: colConfig.name,
+          target_value: row[0].value,
+          context_values: contextValues,
+          input_source_type,
+          input_data,
+          custom_prompt,
+        };
+      });
 
       // Make a single batch request
       const response = await fetch(`${API_URL}/api/enrich/batch`, {
@@ -173,9 +221,9 @@ const Spreadsheet: React.FC<SpreadsheetProps> = ({
           Authorization: apiKey,
         },
         body: JSON.stringify({
-          column_name: data.headers[colIndex],
-          rows: targetValues,
-          context_values: contextValues,
+          column_name: colConfig.name,
+          rows: data.rows.map(row => row[0].value),
+          context_values: contextValues
         }),
       });
 
@@ -209,13 +257,11 @@ const Spreadsheet: React.FC<SpreadsheetProps> = ({
       // Reset loading state on error for all cells at once
       const errorRows = data.rows.map((row) => {
         const newRow = [...row];
-
         newRow[colIndex] = {
           ...newRow[colIndex],
           enriched: false,
           loading: false,
         };
-
         return newRow;
       });
       setData({ ...data, rows: errorRows });
@@ -229,8 +275,8 @@ const Spreadsheet: React.FC<SpreadsheetProps> = ({
 
   const enrichTable = async () => {
     if (
-      !data.headers[0]?.trim() ||
-      !data.headers.slice(1).some((header: string) => header?.trim().length > 0)
+      !data.headers[0]?.name ||
+      !data.headers.slice(1).some((header: ColumnConfig) => header?.name.trim().length > 0)
     ) {
       setToast({
         message: "Please set the first column and at least one other header",
@@ -262,7 +308,8 @@ const Spreadsheet: React.FC<SpreadsheetProps> = ({
       if (!row[0]?.value?.trim()) return row;
 
       return row.map((cell, colIndex) => {
-        const hasHeader = data.headers[colIndex]?.trim();
+        const headerName = data.headers[colIndex]?.name;
+        const hasHeader = typeof headerName === "string" && headerName.trim() !== "";
         return hasHeader && colIndex !== 0 && !cell.enriched
           ? { ...cell, loading: true }
           : cell;
@@ -285,12 +332,17 @@ const Spreadsheet: React.FC<SpreadsheetProps> = ({
 
           // Generate context from other columns using row 0 as sample (or could build dynamic per-row later)
           data.headers.forEach((otherHeader, otherIdx) => {
-            if (otherIdx !== colIndex && otherHeader.trim() !== "") {
-              columnContext[otherHeader] = data.rows[0][otherIdx].value;
+            const otherHeaderName = otherHeader?.name;
+            if (
+              otherIdx !== colIndex &&
+              typeof otherHeaderName === "string" &&
+              otherHeaderName.trim() !== ""
+            ) {
+              columnContext[otherHeaderName] = data.rows[0][otherIdx].value;
             }
           });
 
-          requestData[header] = {
+          requestData[header.name] = {
             rows,
             context_values: columnContext,
           };
@@ -317,8 +369,8 @@ const Spreadsheet: React.FC<SpreadsheetProps> = ({
         row.map((cell, colIndex) => {
           const colName = data.headers[colIndex];
           const enrichedValue =
-            result.enriched_values?.[colName]?.[rowIndex] ?? "";
-          const sources = result.sources?.[colName]?.[rowIndex] ?? [];
+            result.enriched_values?.[colName.name]?.[rowIndex] ?? "";
+          const sources = result.sources?.[colName.name]?.[rowIndex] ?? [];
 
           return {
             value: enrichedValue || cell.value,
@@ -353,13 +405,13 @@ const Spreadsheet: React.FC<SpreadsheetProps> = ({
 
   const startEditingHeader = (index: number) => {
     setEditingHeader(index);
-    setHeaderEditValue(data.headers[index]);
+    setHeaderEditValue(data.headers[index].name);
   };
 
   const saveHeaderEdit = () => {
     if (editingHeader !== null) {
       const newHeaders = [...data.headers];
-      newHeaders[editingHeader] = headerEditValue;
+      newHeaders[editingHeader] = { ...data.headers[editingHeader], name: headerEditValue };
       setData({ ...data, headers: newHeaders });
       setEditingHeader(null);
     }
@@ -386,6 +438,29 @@ const Spreadsheet: React.FC<SpreadsheetProps> = ({
       headerInputRef.current.focus();
     }
   }, [editingHeader]);
+
+  // Open the config modal for a column
+  const openConfigModal = (index: number) => {
+    setConfigModalIndex(index);
+    setConfigForm({ ...data.headers[index] });
+    setConfigModalOpen(true);
+  };
+
+  // Save the config changes
+  const saveConfigModal = () => {
+    if (configModalIndex !== null) {
+      const newHeaders = [...data.headers];
+      newHeaders[configModalIndex] = { ...configForm };
+      setData({ ...data, headers: newHeaders });
+      setConfigModalOpen(false);
+      setConfigModalIndex(null);
+    }
+  };
+
+  // Handle config form changes
+  const handleConfigChange = (field: keyof ColumnConfig, value: any) => {
+    setConfigForm((prev) => ({ ...prev, [field]: value }));
+  };
 
   return (
     <motion.div
@@ -425,7 +500,7 @@ const Spreadsheet: React.FC<SpreadsheetProps> = ({
                         <input
                           ref={headerInputRef}
                           type="text"
-                          value={headerEditValue}
+                          value={headerEditValue ?? ""}
                           onChange={(e) => setHeaderEditValue(e.target.value)}
                           onBlur={saveHeaderEdit}
                           onKeyDown={handleHeaderKeyDown}
@@ -435,10 +510,10 @@ const Spreadsheet: React.FC<SpreadsheetProps> = ({
                       ) : (
                         <div
                           className="flex items-center max-w-[140px]"
-                          onClick={() => startEditingHeader(index)}
+                          onClick={() => openConfigModal(index)}
                         >
                           <span className="font-medium overflow-hidden text-ellipsis whitespace-nowrap">
-                            {header}
+                            {header.name}
                           </span>
                           <button
                             className="ml-2 text-gray-400 hover:text-blue-500 p-1 rounded-full hover:bg-blue-50 transition-colors"
@@ -521,7 +596,7 @@ const Spreadsheet: React.FC<SpreadsheetProps> = ({
                       <input
                         ref={inputRef}
                         type="text"
-                        value={editValue}
+                        value={editValue ?? ""}
                         onChange={handleCellChange}
                         onBlur={saveCell}
                         onKeyDown={handleKeyDown}
@@ -604,6 +679,77 @@ const Spreadsheet: React.FC<SpreadsheetProps> = ({
           </button>
         </div>
       </div>
+      {configModalOpen && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black bg-opacity-30">
+          <div className="bg-white rounded-lg shadow-lg p-6 w-full max-w-md">
+            <h2 className="text-lg font-semibold mb-4">Configure Column</h2>
+            <div className="mb-3">
+              <label className="block text-sm font-medium mb-1">Column Name</label>
+              <input
+                type="text"
+                className="w-full border rounded px-2 py-1"
+                value={configForm.name ?? ""}
+                onChange={(e) => handleConfigChange("name", e.target.value)}
+              />
+            </div>
+            <div className="mb-3">
+              <label className="block text-sm font-medium mb-1">Enrichment Type</label>
+              <select
+                className="w-full border rounded px-2 py-1"
+                value={configForm.enrichmentType || "predefined"}
+                onChange={(e) => handleConfigChange("enrichmentType", e.target.value)}
+              >
+                {ENRICHMENT_TYPES.map((type) => (
+                  <option key={type.value} value={type.value}>{type.label}</option>
+                ))}
+              </select>
+            </div>
+            {configForm.enrichmentType === "ai_agent" && (
+              <>
+                <div className="mb-3">
+                  <label className="block text-sm font-medium mb-1">Map Input From Column</label>
+                  <select
+                    className="w-full border rounded px-2 py-1"
+                    value={configForm.mappedColumnIndex ?? ""}
+                    onChange={(e) => handleConfigChange("mappedColumnIndex", e.target.value === "" ? undefined : Number(e.target.value))}
+                  >
+                    <option value="">Select column</option>
+                    {data.headers.map((header, idx) =>
+                      idx !== configModalIndex ? (
+                        <option key={idx} value={idx}>{header.name || `Column ${idx + 1}`}</option>
+                      ) : null
+                    )}
+                  </select>
+                </div>
+                <div className="mb-3">
+                  <label className="block text-sm font-medium mb-1">Custom Prompt</label>
+                  <textarea
+                    className="w-full border rounded px-2 py-1"
+                    value={configForm.customPrompt ?? ""}
+                    onChange={(e) => handleConfigChange("customPrompt", e.target.value)}
+                    rows={3}
+                    placeholder="e.g. Using the website from Column B, who is their target audience?"
+                  />
+                </div>
+              </>
+            )}
+            <div className="flex justify-end gap-2 mt-4">
+              <button
+                className="px-4 py-2 rounded bg-gray-200 hover:bg-gray-300"
+                onClick={() => setConfigModalOpen(false)}
+              >
+                Cancel
+              </button>
+              <button
+                className="px-4 py-2 rounded bg-blue-600 text-white hover:bg-blue-700"
+                onClick={saveConfigModal}
+              >
+                Save
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </motion.div>
   );
 };
