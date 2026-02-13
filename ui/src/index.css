@@ -1,70 +1,222 @@
-@import url('https://fonts.googleapis.com/css2?family=DM+Sans:opsz,wght@9..40,400;9..40,500;9..40,600;9..40,700&display=swap');
-
 @tailwind base;
 @tailwind components;
 @tailwind utilities;
 
 @layer base {
+  :root {
+    /* Tavily Colors */
+    --color-background: #fefcf5;
+    --color-black: #3C3A39;
+    --color-black-80: #0b0907cc;
+    --color-black-60: #0b090799;
+    --color-black-40: #0b090766;
+    --color-black-20: #0b090733;
+    --color-black-10: #0b09071a;
+    --color-black-5: #0b09070d;
+    --color-white: #fffcf6;
+    --color-white-50: #fffcf680;
+    --color-white-10: #fffcf61a;
+    --color-primary-blue: #2677FF;
+    --color-light-gray: #f7f7f5;
+    --color-beige: #ede6db;
+    --color-beige-hover: #ddd4c9;
+    --color-primary-yellow: #FDC211;
+    
+    /* Safe area insets for notched devices */
+    --safe-area-inset-top: env(safe-area-inset-top, 0px);
+    --safe-area-inset-bottom: env(safe-area-inset-bottom, 0px);
+    --safe-area-inset-left: env(safe-area-inset-left, 0px);
+    --safe-area-inset-right: env(safe-area-inset-right, 0px);
+  }
+
+  * {
+    box-sizing: border-box;
+    padding: 0;
+    margin: 0;
+  }
+
   body {
-    @apply bg-gray-900;
-    font-family: "DM Sans", sans-serif;
+    background: var(--color-background);
+    color: var(--color-black);
+    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', 'Roboto', sans-serif;
     -webkit-font-smoothing: antialiased;
+    -moz-osx-font-smoothing: grayscale;
     text-rendering: optimizeLegibility;
-    background-image: radial-gradient(circle at 1px 1px, rgba(255, 255, 255, 0.05) 1px, transparent 0);
-    background-size: 24px 24px;
-    background-position: center center;
+    overscroll-behavior-y: contain; /* Prevent pull-to-refresh interference */
+  }
+
+  h1, h2, h3, h4, h5, h6 {
+    font-weight: 500;
+    line-height: 1;
+    color: var(--color-black);
   }
 
   h1 {
-    font-family: "DM Sans", sans-serif;
-    font-size: 48px;
-    font-style: normal;
-    font-variation-settings: normal;
-    font-weight: 500;
-    letter-spacing: -1px;
-    text-rendering: optimizeLegibility;
-    unicode-bidi: isolate;
-    -webkit-font-smoothing: antialiased;
-  }
-
-  h2, h3, h4, h5, h6 {
-    font-family: "DM Sans", sans-serif;
-    font-weight: 500;
-    letter-spacing: -0.5px;
+    font-size: clamp(2.5rem, 4vw + 1rem, 3.5rem);
+    letter-spacing: -1.5px;
   }
 
   p, span, div, li, a {
-    font-family: "DM Sans", sans-serif;
     font-weight: 400;
+    line-height: 1.1;
   }
 
-  input {
-    font-family: "DM Sans", sans-serif;
+  input, button, select, textarea {
+    font-family: inherit;
   }
 
-  button {
-    font-family: "DM Sans", sans-serif;
+  /* Mobile-specific line heights */
+  @media (max-width: 640px) {
+    p, span, div, li, a {
+      line-height: 1.4; /* Improved readability on small screens */
+    }
+    
+    h1 {
+      font-size: clamp(1.75rem, 6vw, 2.5rem);
+      letter-spacing: -0.5px;
+    }
   }
 
-  select {
-    font-family: "DM Sans", sans-serif;
+  /* Prevent zoom on input focus for iOS */
+  @media screen and (max-width: 640px) {
+    input, textarea, select {
+      font-size: 16px !important; /* Prevents iOS zoom */
+    }
   }
 }
 
 @layer components {
+  /* Liquid Glass Effect */
   .glass {
-    @apply bg-gray-900/40 backdrop-blur-md border border-gray-700/50;
+    background: rgba(255, 252, 246, 0.4);
+    backdrop-filter: blur(10px);
+    -webkit-backdrop-filter: blur(10px);
+    border: 1px solid var(--color-white);
+    box-shadow: 0 4px 6px rgba(60, 58, 57, 0.05);
   }
+
+  .glass-subtle {
+    background: rgba(255, 252, 246, 0.6);
+    backdrop-filter: blur(15px);
+    -webkit-backdrop-filter: blur(15px);
+    border: 1px solid var(--color-white);
+  }
+  
+  .scrollbar-hide {
+    -ms-overflow-style: none;
+    scrollbar-width: none;
+  }
+  
+  .scrollbar-hide::-webkit-scrollbar {
+    display: none;
+  }
+
+  /* Tavily-style buttons */
+  .btn-primary {
+    background: var(--color-beige);
+    color: var(--color-black);
+    border: none;
+    border-radius: 100px;
+    padding: 8px 16px;
+    font-size: 14px;
+    font-weight: 400;
+    cursor: pointer;
+    transition: all 0.2s ease;
+  }
+
+  .btn-primary:hover {
+    background: var(--color-beige-hover);
+  }
+
+  .btn-primary:active {
+    transform: scale(0.95);
+  }
+
+  /* Tavily-style tabs */
+  .tab-group {
+    display: flex;
+    gap: 5px;
+    background: var(--color-black-5);
+    border-radius: 100px;
+    padding: 3px;
+  }
+
+  .tab {
+    padding: 5px 12px;
+    background: transparent;
+    border: none;
+    border-radius: 100px;
+    color: var(--color-black-40);
+    cursor: pointer;
+    transition: all 0.2s ease;
+    font-size: 14px;
+    white-space: nowrap;
+  }
+
+  .tab:hover {
+    color: var(--color-black-60);
+  }
+
+  .tab.active {
+    background: var(--color-black);
+    color: var(--color-white);
+    box-shadow: 0px 0px 3px 0px rgba(0, 0, 0, 0.3);
+  }
+
+  /* Mobile-specific tab and button styles */
+  @media (max-width: 640px) {
+    .tab-group {
+      padding: 2px;
+    }
+    
+    .tab {
+      padding: 6px 10px;
+      font-size: 13px;
+    }
+    
+    .btn-primary {
+      padding: 10px 16px; /* Larger touch target */
+      font-size: 14px;
+    }
+  }
+
+  /* Touch feedback for mobile devices */
+  @media (hover: none) and (pointer: coarse) {
+    .btn-primary:active,
+    .tab:active,
+    .glass:active {
+      transform: scale(0.97);
+      transition: transform 0.1s ease;
+    }
+  }
+}
+
+/* Ensure proper viewport height on mobile browsers */
+@supports (height: 100dvh) {
+  .min-h-screen-dvh {
+    min-height: 100dvh;
+  }
+  
+  .h-screen-dvh {
+    height: 100dvh;
+  }
+}
+
+/* Darker placeholder text */
+.placeholder-dark::placeholder {
+  color: var(--color-black-40);
+  opacity: 1;
 }
 
 /* Spreadsheet Styles */
 .spreadsheet-container {
-  box-shadow: 0 4px 20px rgba(0, 0, 0, 0.05);
+  box-shadow: 0 4px 20px rgba(60, 58, 57, 0.05);
   border-radius: 12px;
   max-height: 70vh;
   display: flex;
   flex-direction: column;
   overflow: hidden;
+  background: var(--color-white);
 }
 
 .spreadsheet-container table {
@@ -80,11 +232,12 @@
   text-overflow: ellipsis;
   transition: all 0.2s;
   padding: 10px;
-  background-color: white;
+  background-color: var(--color-white);
+  color: var(--color-black);
 }
 
 .spreadsheet-container td:hover {
-  background-color: rgba(236, 245, 255, 0.9);
+  background-color: var(--color-beige);
 }
 
 .spreadsheet-container th {
@@ -92,13 +245,14 @@
   top: 0;
   z-index: 2;
   font-weight: 500;
-  color: #374151;
+  color: var(--color-black);
   user-select: none;
   padding: 12px 10px;
+  background-color: var(--color-light-gray);
 }
 
 .spreadsheet-container tbody tr:hover td {
-  background-color: rgba(239, 246, 255, 0.9);
+  background-color: var(--color-beige);
 }
 
 .spreadsheet-container td:first-child {
@@ -123,9 +277,9 @@
 
 /* Animation for enriched cells */
 @keyframes enrichPulse {
-  0% { background-color: rgba(16, 185, 129, 0.05); }
-  50% { background-color: rgba(16, 185, 129, 0.1); }
-  100% { background-color: rgba(16, 185, 129, 0.05); }
+  0% { background-color: rgba(38, 119, 255, 0.05); }
+  50% { background-color: rgba(38, 119, 255, 0.1); }
+  100% { background-color: rgba(38, 119, 255, 0.05); }
 }
 
 .spreadsheet-container td div {
@@ -137,7 +291,7 @@
 
 .spreadsheet-container td[data-enriched="true"] {
   animation: enrichPulse 2s ease-in-out;
-  background-color: rgba(16, 185, 129, 0.1);
+  background-color: rgba(38, 119, 255, 0.08);
 }
 
 /* Animation keyframes for floating gradient orbs */
@@ -164,7 +318,7 @@
 
 /* Enhanced styling for input fields */
 input:focus {
-  box-shadow: 0 0 0 2px rgba(70, 139, 255, 0.3);
+  box-shadow: 0 0 0 2px rgba(38, 119, 255, 0.3);
   transition: all 0.2s ease-in-out;
 }
 
@@ -218,26 +372,26 @@ input:focus {
 }
 
 .spreadsheet-container .overflow-x-auto::-webkit-scrollbar-track {
-  background: #f1f5f9;
+  background: var(--color-light-gray);
   border-radius: 8px;
   margin: 0 8px;
 }
 
 .spreadsheet-container .overflow-x-auto::-webkit-scrollbar-thumb {
-  background: #cbd5e1;
+  background: var(--color-black-20);
   border-radius: 8px;
   border: 2px solid transparent;
   background-clip: padding-box;
 }
 
 .spreadsheet-container .overflow-x-auto::-webkit-scrollbar-thumb:hover {
-  background: #94a3b8;
+  background: var(--color-black-40);
   border: 2px solid transparent;
   background-clip: padding-box;
 }
 
 /* Cell focus effect */
 .spreadsheet-container td:focus-within {
-  box-shadow: inset 0 0 0 2px rgba(59, 130, 246, 0.3);
+  box-shadow: inset 0 0 0 2px rgba(38, 119, 255, 0.3);
   border-radius: 4px;
 }

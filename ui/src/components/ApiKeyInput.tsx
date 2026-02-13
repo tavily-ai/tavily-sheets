@@ -7,102 +7,97 @@ import {
   EyeOff,
 } from "lucide-react";
 import React, { useState } from "react";
-import { motion } from "framer-motion";
 
-const ApiKeyInput: React.FC<any> = ({
-  glassStyle,
+interface ApiKeyInputProps {
+  apiKey?: string;
+  setApiKey: (key: string) => void;
+  isOpen: boolean;
+  setIsOpen: (open: boolean) => void;
+  checkApiKey: () => boolean | 0 | undefined;
+}
+
+const ApiKeyInput: React.FC<ApiKeyInputProps> = ({
   apiKey,
   setApiKey,
   isOpen,
   setIsOpen,
   checkApiKey,
 }) => {
-  // Toggle function to open or close the form
-  const toggleAccordion = () => setIsOpen(!isOpen);
   const [showKey, setShowKey] = useState(false);
 
   return (
-    <motion.div
-      className={`${glassStyle} mb-4 rounded-lg shadow-sm px-4 py-2`}
-      initial={{ opacity: 0, y: 10 }}
-      animate={{ opacity: 1, y: 0 }}
-      transition={{ duration: 0.3 }}
-    >
-      <div className="relative">
-        {/* Main Card for API Keys */}
-
-        {/* Header with a button to toggle the form visibility */}
-        <div
-          className="flex justify-between items-center p-4 cursor-pointer"
-          onClick={toggleAccordion} // Toggle on header click
-        >
-          <div className="flex items-center gap-3">
-            <span className="text-xl font-medium text-gray-700">
-              Tavily API Key
-            </span>
-            <span className="text-xs font-medium text-gray-500 px-2 py-1 bg-gray-100 rounded-md mt-0.5">
-              required
-            </span>
-            {checkApiKey() && (
-              <CheckCircle2 className="h-5 w-5 mt-0.5 text-[#22C55E]" />
-            )}
-          </div>
-          <span className="text-xl text-gray-500">
-            {isOpen ? <ChevronUp /> : <ChevronDown />}
-            {/* Show up/down arrow based on state */}
-          </span>
+    <div className="w-full max-w-[calc(100%-1rem)] sm:max-w-3xl mt-6">
+      <div
+        className="flex items-center gap-2 px-3 sm:px-4 py-3 cursor-pointer transition min-h-[48px]"
+        onClick={() => setIsOpen(!isOpen)}
+        style={{ color: "var(--color-black-60)" }}
+      >
+        <div className="flex items-center gap-2">
+          <KeyRound className="h-4 w-4" />
+          <span className="text-sm">Enter your Tavily API Key</span>
         </div>
-
-        {/* Form Fields (conditionally rendered based on `isOpen` state) */}
-        {isOpen && (
-          <div className="space-y-6 pb-3 px-2 transition-all duration-500 ease-in-out">
-            <div className="relative group">
-              <div className="relative">
-                <KeyRound
-                  className="absolute left-4 top-1/2 -translate-y-1/2 h-5 w-5 stroke-[#468BFF] transition-all duration-200 group-hover:stroke-[#8FBCFA] z-10"
-                  strokeWidth={1.5}
-                />
-                <input
-                  required
-                  id="tavilyApiKey"
-                  type={showKey ? "text" : "password"}
-                  value={apiKey}
-                  spellCheck="false"
-                  onChange={(e) => setApiKey(e.target.value)}
-                  className={`backdrop-filter backdrop-blur-lg bg-white/80 border border-gray-200 shadow-xl pl-10 w-full rounded-lg py-3 px-4 text-gray-900 focus:border-[#468BFF]/50 focus:outline-none focus:ring-1 focus:ring-[#468BFF]/50 placeholder-gray-400 bg-white/80 shadow-none transition-all duration-300 focus:border-[#468BFF]/50 focus:ring-1 focus:ring-[#468BFF]/50 group-hover:border-[#468BFF]/30 bg-white/80 backdrop-blur-sm text-lg py-4 pl-12 pr-12 font-['DM_Sans']`}
-                  placeholder="Enter Tavily API Key"
-                />
-                <button
-                  type="button"
-                  onClick={() => setShowKey(!showKey)}
-                  className="absolute right-4 top-1/2 -translate-y-1/2 text-[#468BFF] hover:text-[#8FBCFA] focus:outline-none z-10"
-                >
-                  {showKey ? (
-                    <EyeOff className="h-5 w-5" />
-                  ) : (
-                    <Eye className="h-5 w-5" />
-                  )}
-                </button>
-              </div>
-            </div>
-            <div className="flex align-center">
-              <p className="text-sm text-gray-600">
-                Each enriched cell will use 1 API credit.
-              </p>
-
-              <a
-                href="https://app.tavily.com" // <-- replace with your real URL
-                target="_blank"
-                rel="noopener noreferrer"
-                className="text-sm text-[#468BFF] hover:text-blue-300 px-1"
-              >
-                Don't have an API key?
-              </a>
-            </div>
-          </div>
+        {checkApiKey() && (
+          <CheckCircle2 className="h-4 w-4" style={{ color: "var(--color-primary-blue)" }} />
+        )}
+        {isOpen ? (
+          <ChevronUp className="h-4 w-4 ml-auto" />
+        ) : (
+          <ChevronDown className="h-4 w-4 ml-auto" />
         )}
       </div>
-    </motion.div>
+      <div
+        className={`px-3 sm:px-4 overflow-hidden transition-all duration-300 ${
+          isOpen
+            ? "max-h-[200px] opacity-100 pb-4"
+            : "max-h-0 opacity-0 pb-0"
+        }`}
+      >
+        <div className="relative mt-2">
+          <input
+            type={showKey ? "text" : "password"}
+            value={apiKey}
+            onChange={(e) => setApiKey(e.target.value)}
+            className="w-full p-3 sm:p-3 pr-12 glass rounded-[12px] border-none outline-none text-base sm:text-sm"
+            style={{
+              color: "var(--color-black)",
+              minHeight: "48px",
+            }}
+            placeholder="tvly-xxxx..."
+            autoComplete="off"
+            autoCorrect="off"
+            autoCapitalize="off"
+            spellCheck="false"
+          />
+          <button
+            type="button"
+            onClick={() => setShowKey(!showKey)}
+            className="absolute right-3 top-1/2 -translate-y-1/2 transition p-2"
+            style={{ color: "var(--color-black-40)" }}
+          >
+            {showKey ? (
+              <EyeOff className="w-5 h-5" />
+            ) : (
+              <Eye className="w-5 h-5" />
+            )}
+          </button>
+        </div>
+        <p
+          className="text-xs mt-2"
+          style={{ color: "var(--color-black-40)" }}
+        >
+          Get your API key at{" "}
+          <a
+            href="https://app.tavily.com"
+            target="_blank"
+            rel="noopener noreferrer"
+            style={{ color: "var(--color-primary-blue)" }}
+            className="hover:underline"
+          >
+            app.tavily.com
+          </a>
+        </p>
+      </div>
+    </div>
   );
 };
 

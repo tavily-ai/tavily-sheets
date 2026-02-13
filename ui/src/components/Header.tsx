@@ -1,14 +1,12 @@
 import React from "react";
-import { Github, Download } from "lucide-react";
-import { exportToCSV } from "../utils";
-import { SpreadsheetData } from "../types";
+import { Github, BookOpen, Home } from "lucide-react";
 
 interface HeaderProps {
   glassStyle: string;
-  data: SpreadsheetData;
 }
 
-const Header: React.FC<HeaderProps> = ({ glassStyle, data }) => {
+const Header: React.FC<HeaderProps> = ({ glassStyle }) => {
+
   const handleImageError = (
     e: React.SyntheticEvent<HTMLImageElement, Event>
   ) => {
@@ -20,60 +18,84 @@ const Header: React.FC<HeaderProps> = ({ glassStyle, data }) => {
   return (
     <div className="relative mb-16">
       <div className="text-center pt-4">
-        <h1 className="text-[48px] font-medium text-[#1a202c] font-['DM_Sans'] tracking-[-1px] leading-[52px] text-center mx-auto antialiased">
+        <h1 className="text-center mx-auto antialiased text-3xl sm:text-4xl" style={{ color: "var(--color-black)" }}>
           Data Enrichment Agent
         </h1>
-        <p className="text-gray-600 text-lg font-['DM_Sans'] mt-4 flex items-center justify-center">
-          Enrich tabular data using Tavily
+        <p className="text-lg mt-4 flex items-center justify-center" style={{ color: "var(--color-black-60)" }}>
+          Enrich tabular data using Tavily /research
+        </p>
+        <p className="text-base mt-2 max-w-2xl mx-auto" style={{ color: "var(--color-black-40)" }}>
+          Best suited for complex and broad questions requiring comprehensive analysis.
+          <br />
+          Each row uses the output_schema to guide search and format results.
         </p>
       </div>
       <div className="absolute top-0 right-0 flex items-center space-x-2">
-        <button
-          onClick={() => exportToCSV(data)}
-          className={`bg-[#468BFF] text-white hover:bg-[#8FBCFA] transition-colors rounded-lg flex items-center justify-center gap-2 text-sm`}
-          style={{ width: "auto", height: "40px", padding: "8px 12px" }}
-          aria-label="Export to CSV"
-        >
-          <Download style={{ width: "16px", height: "auto" }} />
-          Export
-        </button>
         <a
-          href="https://tavily.com"
+          href="https://app.tavily.com/home"
           target="_blank"
           rel="noopener noreferrer"
-          className={`text-gray-600 hover:bg-gray-100 transition-colors ${glassStyle} rounded-lg flex items-center justify-center`}
-          style={{ width: "40px", height: "40px", padding: "8px" }}
-          aria-label="Tavily Website"
+          aria-label="Tavily Home"
         >
-          <img
-            src="/tavilylogo.svg"
-            alt="Tavily Logo"
-            className="w-full h-full object-contain"
-            style={{
-              width: "24px",
-              height: "24px",
-              display: "block",
-              margin: "auto",
+          <div
+            className="p-2.5 sm:p-3 rounded-[10px] sm:rounded-[12px] glass transition-all cursor-pointer"
+            style={{ color: "var(--color-primary-blue)" }}
+            onMouseEnter={(e) => {
+              e.currentTarget.style.transform = "translateY(-2px)";
+              e.currentTarget.style.boxShadow =
+                "0 4px 12px rgba(38, 119, 255, 0.2)";
             }}
-            onError={handleImageError}
-          />
+            onMouseLeave={(e) => {
+              e.currentTarget.style.transform = "translateY(0)";
+              e.currentTarget.style.boxShadow = "none";
+            }}
+          >
+            <Home className="h-5 w-5" />
+          </div>
         </a>
         <a
-          href="https://github.com/tavily-ai/data-enrichment"
+          href="https://github.com/tavily-ai/tavily-sheets"
           target="_blank"
           rel="noopener noreferrer"
-          className={`text-gray-600 hover:bg-gray-100 transition-colors ${glassStyle} rounded-lg flex items-center justify-center`}
-          style={{ width: "40px", height: "40px", padding: "8px" }}
-          aria-label="GitHub Profile"
+          aria-label="Tavily GitHub"
         >
-          <Github
-            style={{
-              width: "24px",
-              height: "24px",
-              display: "block",
-              margin: "auto",
+          <div
+            className="p-2.5 sm:p-3 rounded-[10px] sm:rounded-[12px] glass transition-all cursor-pointer"
+            style={{ color: "#FE363B" }}
+            onMouseEnter={(e) => {
+              e.currentTarget.style.transform = "translateY(-2px)";
+              e.currentTarget.style.boxShadow =
+                "0 4px 12px rgba(254, 54, 59, 0.2)";
             }}
-          />
+            onMouseLeave={(e) => {
+              e.currentTarget.style.transform = "translateY(0)";
+              e.currentTarget.style.boxShadow = "none";
+            }}
+          >
+            <Github className="h-5 w-5" />
+          </div>
+        </a>
+        <a
+          href="https://docs.tavily.com/examples/use-cases/data-enrichment"
+          target="_blank"
+          rel="noopener noreferrer"
+          aria-label="Tavily Website"
+        >
+          <div
+            className="p-2.5 sm:p-3 rounded-[10px] sm:rounded-[12px] glass transition-all cursor-pointer"
+            style={{ color: "var(--color-primary-yellow)" }}
+            onMouseEnter={(e) => {
+              e.currentTarget.style.transform = "translateY(-2px)";
+              e.currentTarget.style.boxShadow =
+                "0 4px 12px rgba(253, 194, 17, 0.2)";
+            }}
+            onMouseLeave={(e) => {
+              e.currentTarget.style.transform = "translateY(0)";
+              e.currentTarget.style.boxShadow = "none";
+            }}
+          >
+            <BookOpen className="h-5 w-5" />
+          </div>
         </a>
       </div>
     </div>
