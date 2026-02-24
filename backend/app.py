@@ -14,7 +14,7 @@ import pandas as pd
 import io
 
 # Add backend directory to Python path for imports
-backend_dir = Path(__file__).parent / "backend"
+backend_dir = Path(__file__).parent
 if str(backend_dir) not in sys.path:
     sys.path.insert(0, str(backend_dir))
 
@@ -24,12 +24,22 @@ from openai import AsyncOpenAI
 
 from google.generativeai import GenerativeModel
 import time
-from backend.graph import enrich_cell_with_graph, LLMProvider, OpenAIProvider, GeminiProvider
-from backend.utils import count_enrichable_items, check_api_key, TableData
+from graph import enrich_cell_with_graph, LLMProvider, OpenAIProvider, GeminiProvider
+from utils import count_enrichable_items, check_api_key, TableData
 import requests
 
-# Import streaming functionality from backend
-from backend.streaming import enrich_table_with_research_streaming
+# Import refactored streaming function
+# Use relative import since we're in the backend directory
+try:
+    from .streaming import enrich_table_with_research_streaming
+except ImportError:
+    # Fallback for when running as script
+    import sys
+    from pathlib import Path
+    backend_dir = Path(__file__).parent
+    if str(backend_dir) not in sys.path:
+        sys.path.insert(0, str(backend_dir))
+    from streaming import enrich_table_with_research_streaming
 
 # Configure logging
 logging.basicConfig(

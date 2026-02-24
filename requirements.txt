@@ -4,8 +4,11 @@ pydantic==2.10.6
 python-dotenv
 openai
 google-generativeai
-tavily_python==0.5.1
+tavily-python>=0.7.17
 python-multipart
 httpx
 langgraph
 python-jose
+pandas
+openpyxl
+xlrd

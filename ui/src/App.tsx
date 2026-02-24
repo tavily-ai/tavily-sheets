@@ -1,9 +1,10 @@
 import { useEffect, useState } from "react";
-import { Header, Spreadsheet, InfoPanel } from "./components";
+import { Header, Spreadsheet } from "./components";
 import { GlassStyle, SpreadsheetData } from "./types";
 import { motion } from "framer-motion";
 import Toast from "./components/Toast";
 import ApiKeyInput from "./components/ApiKeyInput";
+import DemoBanner from "./components/DemoBanner";
 
 const API_URL = import.meta.env.VITE_API_URL;
 const WS_URL = import.meta.env.VITE_WS_URL;
@@ -37,17 +38,6 @@ const style = document.createElement("style");
 style.textContent = writingAnimation;
 document.head.appendChild(style);
 
-// Add DM Sans font import
-const dmSansStyle = document.createElement("style");
-dmSansStyle.textContent = `
-  @import url('https://fonts.googleapis.com/css2?family=DM+Sans:opsz,wght@9..40,400;9..40,500;9..40,600;9..40,700&display=swap');
-  
-  /* Apply DM Sans globally */
-  body {
-    font-family: 'DM Sans', sans-serif;
-  }
-`;
-document.head.appendChild(dmSansStyle);
 
 export type ToastDetail = {
   message?: string;
@@ -56,7 +46,7 @@ export type ToastDetail = {
 };
 
 function App() {
-  const [isInfoPanelOpen, setIsInfoPanelOpen] = useState<boolean>(true);
+  // const [isInfoPanelOpen, setIsInfoPanelOpen] = useState<boolean>(true);
   const [toastDetail, setToastDetail] = useState<ToastDetail>({});
   const [data, setData] = useState<SpreadsheetData>({
     headers: Array(5).fill(""),
@@ -71,10 +61,10 @@ function App() {
 
   // Add these styles at the top of the component, before the return statement
   const glassStyle: GlassStyle = {
-    base: "backdrop-filter backdrop-blur-lg bg-white/80 border border-gray-200 shadow-xl",
-    card: "backdrop-filter backdrop-blur-lg bg-white/80 border border-gray-200 shadow-xl rounded-2xl p-6",
+    base: "glass",
+    card: "glass rounded-2xl p-6",
     input:
-      "backdrop-filter backdrop-blur-lg bg-white/80 border border-gray-200 shadow-xl pl-10 w-full rounded-lg py-3 px-4 text-gray-900 focus:border-[#468BFF]/50 focus:outline-none focus:ring-1 focus:ring-[#468BFF]/50 placeholder-gray-400 bg-white/80 shadow-none",
+      "glass pl-10 w-full rounded-lg py-3 px-4 focus:border-[var(--color-primary-blue)]/50 focus:outline-none focus:ring-1 focus:ring-[var(--color-primary-blue)]/50 placeholder-dark",
   };
 
   const checkApiKey = () => {
@@ -113,9 +103,37 @@ function App() {
   }, []);
 
   return (
-    <div className="min-h-screen bg-[radial-gradient(ellipse_at_top,_var(--tw-gradient-stops))] from-white via-gray-50 to-white p-8 relative overflow-hidden">
-      {/* Enhanced background with multiple layers */}
-      <div className="absolute inset-0 bg-[radial-gradient(circle_at_1px_1px,rgba(70,139,255,0.35)_1px,transparent_0)] bg-[length:24px_24px] bg-center"></div>
+    <div
+      className="min-h-screen-dvh w-screen relative p-8"
+      style={{ background: "var(--color-background)" }}
+    >
+      {/* Background Image Container - Fixed to viewport */}
+      <div className="fixed inset-0 w-full h-full pointer-events-none">
+        <img
+          src="/tavily_landscapes_edited_11.webp"
+          alt=""
+          className="w-full h-full object-cover"
+          style={{ opacity: 0.7 }}
+        />
+        {/* White gradient overlay at top */}
+        <div
+          className="absolute top-0 left-0 right-0 pointer-events-none"
+          style={{
+            height: "50%",
+            background:
+              "linear-gradient(to bottom, var(--color-background) 0%, var(--color-background) 10%, transparent 100%)",
+          }}
+        />
+        {/* White gradient overlay at bottom for better readability */}
+        <div
+          className="absolute bottom-0 left-0 right-0 pointer-events-none"
+          style={{
+            height: "30%",
+            background:
+              "linear-gradient(to top, var(--color-background) 0%, transparent 100%)",
+          }}
+        />
+      </div>
 
       {toastDetail.isShowing && (
         <Toast
@@ -125,83 +143,118 @@ function App() {
         />
       )}
 
-      {/* Add floating gradient orbs for visual interest */}
-      <motion.div
-        className="absolute top-1/4 right-1/4 w-64 h-64 rounded-full bg-gradient-to-br from-blue-300/20 to-purple-300/10 blur-3xl pointer-events-none"
-        animate={{
-          y: [0, -15, 0],
-          x: [0, 10, 0],
-          scale: [1, 1.05, 1],
-        }}
-        transition={{
-          duration: 10,
-          repeat: Infinity,
-          repeatType: "reverse",
-        }}
-      />
-      <motion.div
-        className="absolute bottom-1/3 left-1/4 w-48 h-48 rounded-full bg-gradient-to-tr from-green-300/10 to-blue-300/20 blur-3xl pointer-events-none"
-        animate={{
-          y: [0, 20, 0],
-          x: [0, -15, 0],
-          scale: [1, 1.1, 1],
-        }}
-        transition={{
-          duration: 15,
-          repeat: Infinity,
-          repeatType: "reverse",
-        }}
-      />
+      {/* Experimental Demo Banner - Fixed at top */}
+      <DemoBanner />
 
-      {/* Add a subtle animated glow around the main content */}
-      <motion.div
-        className="absolute inset-0 mx-auto max-w-7xl h-full bg-gradient-to-b from-blue-50/10 to-purple-50/10 blur-3xl rounded-[40px] pointer-events-none"
-        initial={{ opacity: 0 }}
-        animate={{ opacity: 1 }}
-        transition={{ duration: 1.5 }}
-      />
-
-      <div className="max-w-7xl mx-auto space-y-8 relative">
+      <div className="max-w-7xl mx-auto space-y-8 relative z-10" style={{ minHeight: "100vh", paddingBottom: "2rem" }}>
         {/* Header Component */}
         <motion.div
           initial={{ opacity: 0, y: -20 }}
           animate={{ opacity: 1, y: 0 }}
           transition={{ duration: 0.5 }}
         >
-          <Header glassStyle={glassStyle.card} data={data} />
+          <Header
+            glassStyle={glassStyle.card}
+          />
         </motion.div>
 
-        {/* Spreadsheet Component */}
+        {/* API Key Input - Always visible */}
         <motion.div
-          className="relative"
           initial={{ opacity: 0 }}
           animate={{ opacity: 1 }}
-          transition={{ duration: 0.5, delay: 0.2 }}
+          transition={{ duration: 0.5, delay: 0.1 }}
         >
           <ApiKeyInput
-            glassStyle={glassStyle.base}
             apiKey={apiKey}
             setApiKey={setApiKey}
             isOpen={isApiKeyDropdownOpen}
             setIsOpen={setIsApiKeyDropdownOpen}
             checkApiKey={checkApiKey}
           />
-          {isInfoPanelOpen && (
-            <InfoPanel
-              glassStyle={glassStyle.card}
-              onDismiss={() => setIsInfoPanelOpen(false)}
-            />
+        </motion.div>
+
+        {/* Content wrapper - disabled when API key is missing */}
+        <div
+          className="relative"
+          style={{
+            opacity: checkApiKey() ? 1 : 0.7,
+            pointerEvents: checkApiKey() ? "auto" : "none",
+            transition: "opacity 0.3s ease-in-out"
+          }}
+        >
+          {/* Overlay message when API key is missing */}
+          {!checkApiKey() && (
+            <motion.div
+              className="absolute inset-0 z-50 flex items-center justify-center"
+              initial={{ opacity: 0 }}
+              animate={{ opacity: 1 }}
+              transition={{ duration: 0.5, delay: 0.2 }}
+              style={{
+                pointerEvents: "none",
+                background: "rgba(255, 255, 255, 0.1)",
+                backdropFilter: "blur(2px)",
+                borderRadius: "1rem"
+              }}
+            >
+              <div
+                className="glass rounded-2xl p-6 text-center"
+                style={{
+                  pointerEvents: "auto",
+                  backdropFilter: "none",
+                  WebkitBackdropFilter: "none"
+                }}
+              >
+                <p className="text-lg font-medium" style={{ color: "var(--color-black)", opacity: 1 }}>
+                  Please enter your API key above to enable the table
+                </p>
+                <p className="text-sm mt-2" style={{ color: "var(--color-black-60)", opacity: 1 }}>
+                  Get your API key at{" "}
+                  <a
+                    href="https://app.tavily.com"
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    className="underline"
+                    style={{ color: "var(--color-primary-blue)", opacity: 1 }}
+                  >
+                    app.tavily.com
+                  </a>
+                </p>
+              </div>
+            </motion.div>
           )}
 
-          <Spreadsheet
-            data={data}
-            setData={setData}
-            setToast={setToastDetail}
-            apiKey={apiKey || ""}
-            checkApiKey={checkApiKey}
-          />
-        </motion.div>
+          {/* Spreadsheet Component */}
+          <motion.div
+            className="relative"
+            initial={{ opacity: 0 }}
+            animate={{ opacity: 1 }}
+            transition={{ duration: 0.5, delay: 0.2 }}
+          >
+            <Spreadsheet
+              data={data}
+              setData={setData}
+              setToast={setToastDetail}
+              apiKey={apiKey || ""}
+              checkApiKey={checkApiKey}
+              isApiKeyDropdownOpen={isApiKeyDropdownOpen}
+              setIsApiKeyDropdownOpen={setIsApiKeyDropdownOpen}
+              setApiKey={setApiKey}
+            />
+          </motion.div>
+        </div>
       </div>
+      <a
+        className="ot-sdk-show-settings px-4 py-2 text-sm text-gray-700 hover:text-gray-900 underline"
+        href="#"
+        style={{
+          position: "fixed",
+          bottom: "1rem",
+          right: "1rem",
+          zIndex: 50
+        }}
+      >
+        Cookie Settings
+      </a>
     </div>
   );
 }

@@ -11,6 +11,8 @@ from langgraph.graph import END, START, StateGraph
 from openai import AsyncOpenAI
 from tavily import TavilyClient
 
+MAX_TOKENS = 20000
+
 # Configure logging
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -57,17 +59,70 @@ class EnrichmentPipeline:
         self.llm = llm_provider
 
     async def search_tavily(self, state: EnrichmentContext):
-        """Run Tavily search in a separate thread"""
+        """Run Tavily research in a separate thread"""
         try:
             query = f"{state.column_name} of {state.target_value}?"
-            logger.info(f"Searching Tavily with query: {query}")
-            result = await asyncio.to_thread(
-                lambda: self.tavily.search(
-                    query=query, auto_parameters=True, search_depth="advanced", max_results = 5, include_raw_content=True
+            logger.info(f"Researching Tavily with query: {query}")
+            
+            # Use Tavily Research API (async - requires polling)
+            # Research API uses 'input' parameter instead of 'query'
+            def start_research():
+                # Create generic schema for structured output
+                # Tavily only accepts 'properties' and 'required' keys, not full JSON Schema
+                output_schema = {
+                    "properties": {
+                        "answer": {
+                            "type": "string",
+                            "description": f"Comprehensive information about {state.column_name} of {state.target_value}. Format as a clean report without markdown links or citations."
+                        }
+                    },
+                    "required": ["answer"]
+                }
+                return self.tavily.research(
+                    input=query,
+                    model="mini",
+                    output_schema=output_schema
                 )
-            )
-            print(result["auto_parameters"])
-            logger.info(f"Tavily search result: {result}")
+            
+            # Start the research task
+            initial_response = await asyncio.to_thread(start_research)
+            logger.info(f"Research task started: {initial_response}")
+            
+            # Check if we got a request_id (async task)
+            request_id = initial_response.get('request_id')
+            if request_id:
+                # Poll for completion
+                max_attempts = 120   # Maximum 10 minutes (120 * 5 seconds)
+                attempt = 0
+                
+                while attempt < max_attempts:
+                    await asyncio.sleep(5)  # Wait 5 seconds between polls
+                    attempt += 1
+                    
+                    def get_research_status():
+                        return self.tavily.get_research(request_id)
+                    
+                    status_response = await asyncio.to_thread(get_research_status)
+                    status = status_response.get('status', 'pending')
+                    
+                    logger.info(f"Research status check {attempt}: {status}")
+                    
+                    if status == 'completed':
+                        logger.info(f"Research completed after {attempt * 5} seconds")
+                        result = status_response
+                        break
+                    elif status == 'failed':
+                        logger.error(f"Research task failed: {status_response}")
+                        raise Exception(f"Research task failed: {status_response.get('error', 'Unknown error')}")
+                    # Continue polling if status is 'pending' or other
+                else:
+                    # Timeout after max attempts
+                    raise Exception(f"Research task timed out after {max_attempts * 5} seconds")
+            else:
+                # If no request_id, assume it's already completed (synchronous response)
+                result = initial_response
+            
+            logger.info(f"Tavily research result: {result}")
             return {"search_result": result}
         except Exception as e:
             logger.error(f"Error in search_tavily: {str(e)}")
@@ -76,39 +131,84 @@ class EnrichmentPipeline:
     async def extract_minimal_answer(
         self, state: EnrichmentContext
     ) -> Dict:
-        """Use LLM to extract a minimal answer from Tavily's results."""
-        content = ""
-        # Alternative implementation using list comprehension and join
-        result_contents = [result["raw_content"] for result in state.search_result["results"] if result.get("raw_content") is not None]
-        content = "\n\n---\n\n".join(result_contents)
-        print(f"Content: {content}")
-        try:
-            prompt = f"""
-                    Extract the {state.column_name} of {state.target_value} from this search result:
+        """Use LLM to extract a minimal answer from Tavily's research results."""
+        search_result = state.search_result
+        
+        # Log for debugging
+        logger.info(f"Extract minimal answer for {state.target_value}")
+        logger.info(f"Search result type: {type(search_result)}, keys: {list(search_result.keys()) if isinstance(search_result, dict) else 'Not a dict'}")
+        
+        # Research API response format (always research mode now)
+        if isinstance(search_result, dict):
+            # Check if it's structured output (from output_schema)
+            if "answer" in search_result:
+                # Structured output from output_schema - already clean and formatted
+                answer = search_result["answer"]
+                logger.info(f"Using structured research answer for {state.target_value} (length: {len(answer) if answer else 0})")
+                # Still process through LLM to ensure it's clean and remove any remaining links
+                try:
+                    truncated_answer = answer[:MAX_TOKENS] if len(answer) > MAX_TOKENS else answer
+                    prompt = f"""
+                        Process this research answer and ensure it's clean:
 
-                    {content}
+                        {truncated_answer}
 
+                        Rules:
+                            1. Keep the content as-is but ensure no markdown links remain
+                            2. Remove any citation references like [1], [2], etc.
+                            3. Ensure clean formatting
+                            4. Return the cleaned answer
+                            
+                        Clean Answer:
+                        """
+                    logger.info(f"Final cleaning of structured research answer for {state.target_value}")
+                    cleaned_answer = await self.llm.generate(prompt)
+                    return {"answer": cleaned_answer}
+                except Exception as e:
+                    logger.error(f"Error cleaning structured answer: {str(e)}")
+                    # Fallback to structured answer if LLM fails
+                    return {"answer": answer}
+            elif search_result.get("content"):
+                # Original markdown format (fallback if output_schema not used)
+                research_content = search_result["content"]
+                logger.info(f"Processing Research API content through LLM for {state.target_value} (length: {len(research_content) if research_content else 0})")
+                
+                # Truncate content if too long (respect MAX_TOKENS)
+                truncated_content = research_content[:MAX_TOKENS] if len(research_content) > MAX_TOKENS else research_content
+                
+                try:
+                    prompt = f"""
+                        Process this research report and provide a clean, formatted answer:
 
-                    Rules:
-                    1. Provide ONLY the direct answer - no explanations
-                    2. Be concise
-                    3. If not found, respond "Information not found"
-                    4. No citations or references
-                    Direct Answer:
+                        {truncated_content}
+
+                        Rules:
+                        1. Provide a well-formatted report answer based on the research content
+                        2. Remove all markdown links (e.g., [text](url) or [1], [2] citations)
+                        3. Remove source citations and reference numbers
+                        4. Keep the structure and formatting but make it clean
+                        5. Focus on answering: {state.column_name} of {state.target_value}
+                        6. Be comprehensive but concise
+                        
+                        Clean Report Answer:
                     """
-            logger.info(f"Extracting answer for {state.target_value}")
-
-            answer = await self.llm.generate(prompt)
-            logger.info(f"Prompt: {prompt}")
-            logger.info(f"Extracted answer: {answer}")
-            return {"answer": answer}
-        except Exception as e:
-            logger.error(f"Error in extract_minimal_answer: {str(e)}")
-            return {"answer": "Information not found"}
+                    logger.info(f"Processing research content through LLM for {state.target_value}")
+                    answer = await self.llm.generate(prompt)
+                    logger.info(f"LLM processed research answer for {state.target_value}")
+                    return {"answer": answer}
+                except Exception as e:
+                    logger.error(f"Error processing research content through LLM: {str(e)}")
+                    # Fallback to original content if LLM fails
+                    return {"answer": research_content}
+        
+        # Fallback: if no structured answer or content, return empty
+        logger.warning(f"No answer or content found in research result for {state.target_value}")
+        return {"answer": "Information not found"}
 
     def build_graph(self):
         """build and compile the graph"""
         graph = StateGraph(EnrichmentContext)
+        
         graph.add_node("search", self.search_tavily)
         graph.add_node("extract", self.extract_minimal_answer)
         #graph.add_node("enrich", self.enrich)
@@ -124,7 +224,8 @@ async def enrich_cell_with_graph(
     target_value: str,
     context_values: Dict[str, str],
     tavily_client,
-    llm_provider: LLMProvider
+    llm_provider: LLMProvider,
+    tavily_mode: str = "research"  # Keep for backward compatibility but always use research
 ) -> Dict:
     """Helper function to enrich a single cell using langgraph."""
     try:

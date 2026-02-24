@@ -21,8 +21,9 @@ This repository provides a powerful solution for building AI-enriched spreadshee
 
 With this application, you can:
 - 📊 Enrich spreadsheet cells with AI-generated content backed by live web data
-- 🧠 Entity extraction and unstrcutured data processing with LLMs
-- 🔄 Process entire columns as a batch for efficient data enhancement
+- 🧠 Entity extraction and unstructured data processing with LLMs
+- 🔄 Process entire columns or tables in batch for efficient data enhancement
+- ⚡ Real-time streaming updates as data is processed
 - 📑 Source citations for all web-sourced information
 - 📂 Export your enriched data as CSV files for further use
 
@@ -42,21 +43,26 @@ Designed for ease of customization, you can extend this core implementation to:
 #### API Keys:
 
 This application requires API keys from the following services:
-- [tavily API](https://app.tavily.com/home) (default) or Gemini optionally
-- [OpenAI](https://platform.openai.com/docs/overview)
+- [Tavily API](https://app.tavily.com/home) - Required for web search capabilities
+- [OpenAI](https://platform.openai.com/docs/overview) - Required (or use Gemini as alternative)
+- [Gemini API](https://ai.google.dev/) - Optional alternative to OpenAI
+
 #### Set up environment variables:
 
-   a. Create a `.env` file in the project's root directory with your API keys:
+   a. Copy the `.env.sample` file to create your `.env` file in the project's root directory:
    ```bash
-   TAVILY_API_KEY=<your API key>
-   OPENAI_API_KEY=<your API key>
-   GEMINI_API_KEY=<your API key>
-   VITE_WS_URL=ws://localhost:8000
-   VITE_APP_URL=http://localhost:5173
-
+   cp .env.sample .env
    ```
 
-   b. Create a `.env.development` file in the `ui` directory with:
+   Then edit `.env` and add your API keys:
+   ```bash
+   OPENAI_API_KEY=your_openai_api_key_here
+   GEMINI_API_KEY=your_gemini_api_key_here  # Optional
+   JWT_SECRET=your_jwt_secret_here  # Generate a secure random string
+   VITE_APP_URL=http://localhost:5173
+   ```
+
+   b. The `ui/.env.development` file is already configured for local development with:
    ```bash
    VITE_API_URL=http://localhost:8000
    VITE_WS_URL=ws://localhost:8000
