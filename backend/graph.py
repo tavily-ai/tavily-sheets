@@ -26,7 +26,7 @@ class LLMProvider(ABC):
         pass
 
 class OpenAIProvider(LLMProvider):
-    def __init__(self, client, model="gpt-4.1-2025-04-14"):
+    def __init__(self, client, model="gpt-5.4-mini"):
         self.client = client
         self.model = model
 

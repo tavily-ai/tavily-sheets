@@ -93,7 +93,7 @@ def init_clients(tavily_api_key: str):
         # OpenAI provider (optional)
         if openai_api_key:
             openai_client = AsyncOpenAI(api_key=openai_api_key)
-            openai_provider = OpenAIProvider(openai_client, model="gpt-4o")
+            openai_provider = OpenAIProvider(openai_client, model="gpt-5.4-mini")
         
         # Gemini provider (optional)
         if gemini_api_key:

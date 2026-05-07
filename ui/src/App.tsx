@@ -9,8 +9,6 @@ import DemoBanner from "./components/DemoBanner";
 const API_URL = import.meta.env.VITE_API_URL;
 const WS_URL = import.meta.env.VITE_WS_URL;
 
-const API_KEY_LENGTH = 32;
-
 if (!API_URL || !WS_URL) {
   throw new Error(
     "Environment variables VITE_API_URL and VITE_WS_URL must be set"
@@ -45,6 +43,12 @@ export type ToastDetail = {
   isShowing?: boolean;
 };
 
+const normalizeApiKey = (value?: string): string =>
+  (value ?? "").replace(/\s+/g, "").trim();
+
+const isLikelyTavilyApiKey = (value?: string): boolean =>
+  /^tvly-[A-Za-z0-9_-]{20,}$/.test(normalizeApiKey(value));
+
 function App() {
   // const [isInfoPanelOpen, setIsInfoPanelOpen] = useState<boolean>(true);
   const [toastDetail, setToastDetail] = useState<ToastDetail>({});
@@ -55,7 +59,7 @@ function App() {
       .map(() => Array(5).fill({ value: "" })),
   });
 
-  const [apiKey, setApiKey] = useState<string>();
+  const [apiKey, setApiKey] = useState<string>("");
   const [isApiKeyDropdownOpen, setIsApiKeyDropdownOpen] =
     useState<boolean>(false);
 
@@ -68,13 +72,7 @@ function App() {
   };
 
   const checkApiKey = () => {
-    const splitKey = apiKey?.split("-");
-    return (
-      splitKey &&
-      splitKey.length &&
-      splitKey[splitKey.length - 1]?.length === API_KEY_LENGTH &&
-      apiKey?.includes("tvly-")
-    );
+    return isLikelyTavilyApiKey(apiKey);
   };
 
   const fetchKey = async () => {
@@ -90,7 +88,7 @@ function App() {
       }
 
       const result = await response.json();
-      setApiKey(result.data);
+      setApiKey(normalizeApiKey(result.data));
     } catch (err) {
       console.error(err);
     }
@@ -166,7 +164,7 @@ function App() {
         >
           <ApiKeyInput
             apiKey={apiKey}
-            setApiKey={setApiKey}
+            setApiKey={(key) => setApiKey(normalizeApiKey(key))}
             isOpen={isApiKeyDropdownOpen}
             setIsOpen={setIsApiKeyDropdownOpen}
             checkApiKey={checkApiKey}
@@ -234,11 +232,11 @@ function App() {
               data={data}
               setData={setData}
               setToast={setToastDetail}
-              apiKey={apiKey || ""}
+              apiKey={apiKey}
               checkApiKey={checkApiKey}
               isApiKeyDropdownOpen={isApiKeyDropdownOpen}
               setIsApiKeyDropdownOpen={setIsApiKeyDropdownOpen}
-              setApiKey={setApiKey}
+              setApiKey={(key) => setApiKey(normalizeApiKey(key))}
             />
           </motion.div>
         </div>
