@@ -1,3 +1,19 @@
+@font-face {
+  font-family: "Suisse Intl";
+  src: url("/fonts/SuisseIntl-Regular.woff2") format("woff2");
+  font-weight: 400;
+  font-style: normal;
+  font-display: swap;
+}
+
+@font-face {
+  font-family: "Suisse Intl";
+  src: url("/fonts/SuisseIntl-Medium.woff2") format("woff2");
+  font-weight: 500 800;
+  font-style: normal;
+  font-display: swap;
+}
+
 @tailwind base;
 @tailwind components;
 @tailwind utilities;
@@ -17,10 +33,22 @@
     --color-white-50: #fffcf680;
     --color-white-10: #fffcf61a;
     --color-primary-blue: #2677FF;
-    --color-light-gray: #f7f7f5;
+    --color-light-gray: #f5f3ec;
     --color-beige: #ede6db;
     --color-beige-hover: #ddd4c9;
     --color-primary-yellow: #FDC211;
+    --color-muted: #7b776c;
+    --color-line: #ded9cc80;
+
+    /* Shared surface system: every panel in a view uses these */
+    --surface-background: #fffcf680;
+    --surface-border: 1px solid #ffffff;
+    --surface-blur: blur(15px);
+    --surface-shadow: 0 5px 25px rgba(86, 75, 52, 0.03);
+    --surface-radius: 16px;
+
+    --font-sans: "Suisse Intl", -apple-system, BlinkMacSystemFont, "Segoe UI",
+      "Roboto", Arial, sans-serif;
     
     /* Safe area insets for notched devices */
     --safe-area-inset-top: env(safe-area-inset-top, 0px);
@@ -38,7 +66,7 @@
   body {
     background: var(--color-background);
     color: var(--color-black);
-    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', 'Roboto', sans-serif;
+    font-family: var(--font-sans);
     -webkit-font-smoothing: antialiased;
     -moz-osx-font-smoothing: grayscale;
     text-rendering: optimizeLegibility;
@@ -52,8 +80,9 @@
   }
 
   h1 {
-    font-size: clamp(2.5rem, 4vw + 1rem, 3.5rem);
-    letter-spacing: -1.5px;
+    font-size: clamp(2rem, 2.2vw + 1.1rem, 2.5rem);
+    letter-spacing: -1.3px;
+    line-height: 1.12;
   }
 
   p, span, div, li, a {
@@ -63,6 +92,16 @@
 
   input, button, select, textarea {
     font-family: inherit;
+  }
+
+  button:focus-visible,
+  a:focus-visible,
+  input:focus-visible,
+  select:focus-visible,
+  textarea:focus-visible,
+  [tabindex]:focus-visible {
+    outline: 2px solid var(--color-primary-blue);
+    outline-offset: 3px;
   }
 
   /* Mobile-specific line heights */
@@ -86,20 +125,21 @@
 }
 
 @layer components {
-  /* Liquid Glass Effect */
+  /* Warm translucent surface. Shared by every panel so borders,
+     radius, transparency and shadow stay consistent across views. */
   .glass {
-    background: rgba(255, 252, 246, 0.4);
-    backdrop-filter: blur(10px);
-    -webkit-backdrop-filter: blur(10px);
-    border: 1px solid var(--color-white);
-    box-shadow: 0 4px 6px rgba(60, 58, 57, 0.05);
+    background: var(--surface-background);
+    backdrop-filter: var(--surface-blur);
+    -webkit-backdrop-filter: var(--surface-blur);
+    border: var(--surface-border);
+    box-shadow: var(--surface-shadow);
   }
 
   .glass-subtle {
-    background: rgba(255, 252, 246, 0.6);
-    backdrop-filter: blur(15px);
-    -webkit-backdrop-filter: blur(15px);
-    border: 1px solid var(--color-white);
+    background: #fffdf7b3;
+    backdrop-filter: var(--surface-blur);
+    -webkit-backdrop-filter: var(--surface-blur);
+    border: var(--surface-border);
   }
   
   .scrollbar-hide {
@@ -109,6 +149,71 @@
   
   .scrollbar-hide::-webkit-scrollbar {
     display: none;
+  }
+
+  /* Primary action: black pill, slight hover bulge, single shine sweep */
+  .btn-pill {
+    position: relative;
+    overflow: hidden;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    gap: 10px;
+    background: #282826;
+    color: #fffdf5;
+    border: 0;
+    border-radius: 30px;
+    padding: 11px 22px;
+    font-size: 13px;
+    font-weight: 500;
+    cursor: pointer;
+    transition: transform 0.2s ease, box-shadow 0.2s ease;
+  }
+
+  .btn-pill::after {
+    content: "";
+    position: absolute;
+    inset: -60%;
+    background: linear-gradient(
+      100deg,
+      transparent 40%,
+      rgba(255, 255, 255, 0.19) 50%,
+      transparent 60%
+    );
+    transform: translateX(-100%);
+    pointer-events: none;
+  }
+
+  .btn-pill:not(:disabled):hover {
+    transform: scale(1.05);
+    box-shadow: 0 6px 19px rgba(48, 48, 42, 0.15);
+  }
+
+  .btn-pill:not(:disabled):hover::after {
+    animation: shine 0.7s ease;
+  }
+
+  .btn-pill:disabled {
+    opacity: 0.55;
+    cursor: default;
+  }
+
+  .btn-quiet {
+    display: inline-flex;
+    align-items: center;
+    gap: 8px;
+    border: 1px solid #d8d3c6;
+    background: #fffdf580;
+    border-radius: 24px;
+    padding: 9px 16px;
+    font-size: 12px;
+    color: var(--color-black);
+    cursor: pointer;
+    transition: background 0.2s ease, color 0.2s ease;
+  }
+
+  .btn-quiet:hover {
+    background: var(--color-white);
   }
 
   /* Tavily-style buttons */
@@ -394,4 +499,313 @@ input:focus {
 .spreadsheet-container td:focus-within {
   box-shadow: inset 0 0 0 2px rgba(38, 119, 255, 0.3);
   border-radius: 4px;
+}
+
+@keyframes shine {
+  to {
+    transform: translateX(100%);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.001ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.001ms !important;
+    scroll-behavior: auto !important;
+  }
+
+  .btn-pill:not(:disabled):hover {
+    transform: none;
+  }
+}
+
+/* ---------- Header brand and nav ---------- */
+.brand-link {
+  display: inline-flex;
+  align-items: center;
+  flex-shrink: 0;
+  height: 52px;
+  padding: 0 8px;
+  margin-left: -8px;
+  border-radius: 12px;
+  transition: background 150ms ease, transform 150ms ease;
+}
+
+.brand-logo {
+  display: block;
+  height: 40px;
+  width: auto;
+  object-fit: contain;
+}
+
+.brand-link:hover,
+.brand-link:focus-visible {
+  background: var(--color-black-5);
+  transform: translateY(-1px);
+}
+
+.nav-link {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 44px;
+  height: 44px;
+  border-radius: 50%;
+  transition: background 150ms ease, transform 150ms ease;
+}
+
+.landscape-background {
+  position: fixed;
+  inset: 0;
+  z-index: 0;
+  overflow: hidden;
+  pointer-events: none;
+  background: var(--color-background);
+}
+
+.landscape-background img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  opacity: 0.9;
+  filter: saturate(1.26) contrast(1.04);
+}
+
+.landscape-background::before {
+  content: "";
+  position: absolute;
+  inset: 0 0 auto;
+  height: 52%;
+  background: linear-gradient(
+    to bottom,
+    var(--color-background) 0%,
+    var(--color-background) 10%,
+    transparent 100%
+  );
+  z-index: 1;
+}
+
+.landscape-background::after {
+  content: "";
+  position: absolute;
+  inset: auto 0 0;
+  height: 32%;
+  background: linear-gradient(to top, var(--color-background), transparent);
+  z-index: 1;
+}
+
+.github-logo {
+  display: block;
+  width: 28px;
+  height: 28px;
+  object-fit: contain;
+}
+
+.nav-link:hover,
+.nav-link:focus-visible {
+  background: var(--color-black-5);
+  transform: translateY(-1px);
+}
+
+@media (max-width: 640px) {
+  .brand-link {
+    height: 44px;
+  }
+
+  .brand-logo {
+    height: 32px;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .brand-link:hover,
+  .brand-link:focus-visible,
+  .nav-link:hover,
+  .nav-link:focus-visible {
+    transform: none;
+  }
+}
+
+/* ---------- API key dialog ---------- */
+.key-status {
+  display: inline-flex;
+  align-items: center;
+  gap: 9px;
+  padding: 8px 15px;
+  border-radius: 24px;
+  border: 1px solid #ded9c977;
+  background: #fffdf480;
+  font-size: 12px;
+  color: var(--color-black);
+  cursor: pointer;
+  transition: background 0.2s ease, border-color 0.2s ease;
+}
+
+.key-status:hover {
+  background: var(--color-white);
+  border-color: #cfc8b4;
+}
+
+.key-dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: #c8a775;
+  flex-shrink: 0;
+}
+
+.key-dot.connected {
+  background: #7a9a67;
+}
+
+.key-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 100;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 20px;
+  background: rgba(54, 51, 34, 0.31);
+  backdrop-filter: blur(4px);
+  -webkit-backdrop-filter: blur(4px);
+}
+
+.key-dialog {
+  width: 100%;
+  max-width: 460px;
+  max-height: calc(100dvh - 40px);
+  overflow-y: auto;
+  padding: 28px;
+  border: var(--surface-border);
+  border-radius: 20px;
+  background: var(--color-background);
+  color: var(--color-black);
+  box-shadow: 0 25px 90px rgba(51, 43, 36, 0.2);
+}
+
+.key-dialog-icon {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 38px;
+  height: 38px;
+  border-radius: 11px;
+  border: 1px solid #e7e1d2;
+  background: #f4f1e6;
+  color: #7c745f;
+}
+
+.key-dialog h2 {
+  font-size: 19px;
+  letter-spacing: -0.4px;
+  line-height: 1.25;
+}
+
+.key-field {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  border: 1px solid #dedbd0b3;
+  border-radius: 10px;
+  background: #fffef9;
+  padding: 0 12px;
+  transition: border-color 0.2s ease;
+}
+
+.key-field:focus-within {
+  outline: 2px solid var(--color-primary-blue);
+  outline-offset: 2px;
+}
+
+.key-field.invalid {
+  border-color: #c9754680;
+}
+
+.key-field input {
+  flex: 1;
+  min-width: 0;
+  height: 42px;
+  border: 0;
+  outline: 0;
+  background: transparent;
+  font-size: 13px;
+  letter-spacing: 0.2px;
+}
+
+.key-field input:focus {
+  box-shadow: none;
+}
+
+.key-ghost-button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 28px;
+  height: 28px;
+  border: 0;
+  border-radius: 8px;
+  background: transparent;
+  color: var(--color-black-40);
+  cursor: pointer;
+  flex-shrink: 0;
+  transition: background 0.2s ease, color 0.2s ease;
+}
+
+.key-ghost-button:hover {
+  background: var(--color-black-5);
+  color: var(--color-black);
+}
+
+.key-note {
+  display: flex;
+  gap: 9px;
+  align-items: flex-start;
+  border-radius: 10px;
+  background: #f3efe2;
+  padding: 11px 13px;
+  font-size: 11px;
+  line-height: 1.55;
+  color: #7a715f;
+}
+
+.key-error {
+  color: #8f4a31;
+  background: #fff0e5b3;
+  border: 1px solid #c975462a;
+  border-radius: 9px;
+  padding: 10px 13px;
+  font-size: 12px;
+  line-height: 1.5;
+}
+
+.key-text-button {
+  border: 0;
+  background: none;
+  font-size: 12px;
+  color: var(--color-muted);
+  cursor: pointer;
+  padding: 10px 4px;
+  transition: color 0.2s ease;
+}
+
+.key-text-button:hover {
+  color: var(--color-black);
+}
+
+/* ---------- Enrichment table typography ---------- */
+.enrich-table thead th span {
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: 0.8px;
+  color: #6f6b5f;
+  line-height: 1.6;
+}
+
+.enrich-table tbody td {
+  font-size: 12px;
+  line-height: 1.6;
 }

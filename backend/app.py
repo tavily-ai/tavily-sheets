@@ -72,7 +72,9 @@ print(f"APP_URL: {APP_URL}")
 # Add your production domain here when deploying
 allowed_origins = [
     "http://localhost:5173",
+    "http://127.0.0.1:5173",
     "http://localhost:3000",
+    "http://127.0.0.1:3000",
 ]
 if APP_URL:
     allowed_origins.append(APP_URL)
@@ -220,4 +222,3 @@ async def health_check():
 if __name__ == "__main__":
     import uvicorn
     uvicorn.run(app, host="0.0.0.0", port=8000)
-
