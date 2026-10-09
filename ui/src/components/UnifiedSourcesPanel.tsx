@@ -92,7 +92,7 @@ export default function UnifiedSourcesPanel({
                           initial={{ opacity: 0, y: 10 }}
                           animate={{ opacity: 1, y: 0 }}
                           transition={{ delay: index * 0.02 }}
-                          className="block p-2.5 sm:p-3 rounded-[10px] sm:rounded-[12px] transition active:scale-[0.98]"
+                          className="block p-2.5 sm:p-3 rounded-[10px] transition active:scale-[0.98]"
                           style={{
                             background: "var(--color-white)",
                             border: "1px solid var(--color-black-10)",

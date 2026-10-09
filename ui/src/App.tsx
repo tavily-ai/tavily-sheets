@@ -1,11 +1,9 @@
 import { useEffect, useState } from "react";
 import { Header, Spreadsheet } from "./components";
-import { GlassStyle, SpreadsheetData } from "./types";
+import { SpreadsheetData } from "./types";
 import { motion } from "framer-motion";
 import Toast from "./components/Toast";
-import ApiKeyInput from "./components/ApiKeyInput";
-import DemoBanner from "./components/DemoBanner";
-
+import ApiKeyDialog, { ApiKeyStatus } from "./components/ApiKeyDialog";
 const API_URL = import.meta.env.VITE_API_URL;
 const WS_URL = import.meta.env.VITE_WS_URL;
 
@@ -50,7 +48,6 @@ const isLikelyTavilyApiKey = (value?: string): boolean =>
   /^tvly-[A-Za-z0-9_-]{20,}$/.test(normalizeApiKey(value));
 
 function App() {
-  // const [isInfoPanelOpen, setIsInfoPanelOpen] = useState<boolean>(true);
   const [toastDetail, setToastDetail] = useState<ToastDetail>({});
   const [data, setData] = useState<SpreadsheetData>({
     headers: Array(5).fill(""),
@@ -60,20 +57,13 @@ function App() {
   });
 
   const [apiKey, setApiKey] = useState<string>("");
-  const [isApiKeyDropdownOpen, setIsApiKeyDropdownOpen] =
-    useState<boolean>(false);
-
-  // Add these styles at the top of the component, before the return statement
-  const glassStyle: GlassStyle = {
-    base: "glass",
-    card: "glass rounded-2xl p-6",
-    input:
-      "glass pl-10 w-full rounded-lg py-3 px-4 focus:border-[var(--color-primary-blue)]/50 focus:outline-none focus:ring-1 focus:ring-[var(--color-primary-blue)]/50 placeholder-dark",
-  };
+  const [isApiKeyDialogOpen, setIsApiKeyDialogOpen] = useState<boolean>(false);
 
   const checkApiKey = () => {
     return isLikelyTavilyApiKey(apiKey);
   };
+
+  const hasApiKey = checkApiKey();
 
   const fetchKey = async () => {
     try {
@@ -102,35 +92,11 @@ function App() {
 
   return (
     <div
-      className="min-h-screen-dvh w-screen relative p-8"
+      className="min-h-screen-dvh w-full relative"
       style={{ background: "var(--color-background)" }}
     >
-      {/* Background Image Container - Fixed to viewport */}
-      <div className="fixed inset-0 w-full h-full pointer-events-none">
-        <img
-          src="/tavily_landscapes_edited_11.webp"
-          alt=""
-          className="w-full h-full object-cover"
-          style={{ opacity: 0.7 }}
-        />
-        {/* White gradient overlay at top */}
-        <div
-          className="absolute top-0 left-0 right-0 pointer-events-none"
-          style={{
-            height: "50%",
-            background:
-              "linear-gradient(to bottom, var(--color-background) 0%, var(--color-background) 10%, transparent 100%)",
-          }}
-        />
-        {/* White gradient overlay at bottom for better readability */}
-        <div
-          className="absolute bottom-0 left-0 right-0 pointer-events-none"
-          style={{
-            height: "30%",
-            background:
-              "linear-gradient(to top, var(--color-background) 0%, transparent 100%)",
-          }}
-        />
+      <div className="landscape-background" aria-hidden="true">
+        <img src="/tavily-landscape.jpg" alt="" />
       </div>
 
       {toastDetail.isShowing && (
@@ -141,82 +107,72 @@ function App() {
         />
       )}
 
-      {/* Experimental Demo Banner - Fixed at top */}
-      <DemoBanner />
-
-      <div className="max-w-7xl mx-auto space-y-8 relative z-10" style={{ minHeight: "100vh", paddingBottom: "2rem" }}>
-        {/* Header Component */}
+      <div className="relative z-10 mx-auto w-[calc(100%-2rem)] sm:w-[calc(100%-4rem)] max-w-7xl pb-16">
         <motion.div
-          initial={{ opacity: 0, y: -20 }}
+          initial={{ opacity: 0, y: -12 }}
           animate={{ opacity: 1, y: 0 }}
           transition={{ duration: 0.5 }}
         >
-          <Header
-            glassStyle={glassStyle.card}
-          />
+          <Header />
         </motion.div>
 
-        {/* API Key Input - Always visible */}
+        {/* API key entry point - always visible */}
         <motion.div
+          className="flex justify-center mt-2 mb-8"
           initial={{ opacity: 0 }}
           animate={{ opacity: 1 }}
           transition={{ duration: 0.5, delay: 0.1 }}
         >
-          <ApiKeyInput
+          <ApiKeyStatus
+            isValid={hasApiKey}
             apiKey={apiKey}
-            setApiKey={(key) => setApiKey(normalizeApiKey(key))}
-            isOpen={isApiKeyDropdownOpen}
-            setIsOpen={setIsApiKeyDropdownOpen}
-            checkApiKey={checkApiKey}
+            onOpen={() => setIsApiKeyDialogOpen(true)}
           />
         </motion.div>
 
+        <ApiKeyDialog
+          apiKey={apiKey}
+          setApiKey={(key) => setApiKey(normalizeApiKey(key))}
+          isOpen={isApiKeyDialogOpen}
+          setIsOpen={setIsApiKeyDialogOpen}
+        />
+
         {/* Content wrapper - disabled when API key is missing */}
-        <div
-          className="relative"
-          style={{
-            opacity: checkApiKey() ? 1 : 0.7,
-            pointerEvents: checkApiKey() ? "auto" : "none",
-            transition: "opacity 0.3s ease-in-out"
-          }}
-        >
-          {/* Overlay message when API key is missing */}
-          {!checkApiKey() && (
+        <div className="relative">
+          {/* Overlay message when API key is missing. Kept outside the dimmed
+              wrapper so it stays fully legible. */}
+          {!hasApiKey && (
             <motion.div
-              className="absolute inset-0 z-50 flex items-center justify-center"
+              className="absolute inset-0 z-40 flex items-start justify-center pt-24"
               initial={{ opacity: 0 }}
               animate={{ opacity: 1 }}
               transition={{ duration: 0.5, delay: 0.2 }}
               style={{
                 pointerEvents: "none",
-                background: "rgba(255, 255, 255, 0.1)",
-                backdropFilter: "blur(2px)",
-                borderRadius: "1rem"
+                borderRadius: "var(--surface-radius)",
               }}
             >
               <div
-                className="glass rounded-2xl p-6 text-center"
-                style={{
-                  pointerEvents: "auto",
-                  backdropFilter: "none",
-                  WebkitBackdropFilter: "none"
-                }}
+                className="glass rounded-[var(--surface-radius)] px-7 py-6 text-center max-w-sm"
+                style={{ pointerEvents: "auto", background: "#fffdf7f2" }}
               >
-                <p className="text-lg font-medium" style={{ color: "var(--color-black)", opacity: 1 }}>
-                  Please enter your API key above to enable the table
+                <p className="text-[15px] font-medium">
+                  Add a Tavily API key to enable the table
                 </p>
-                <p className="text-sm mt-2" style={{ color: "var(--color-black-60)", opacity: 1 }}>
-                  Get your API key at{" "}
-                  <a
-                    href="https://app.tavily.com"
-                    target="_blank"
-                    rel="noopener noreferrer"
-                    className="underline"
-                    style={{ color: "var(--color-primary-blue)", opacity: 1 }}
-                  >
-                    app.tavily.com
-                  </a>
+                <p
+                  className="text-[12px] mt-2 leading-[1.6]"
+                  style={{ color: "var(--color-muted)" }}
+                >
+                  Enrichment runs against your own Tavily account, so nothing is
+                  researched until a key is connected.
                 </p>
+                <button
+                  type="button"
+                  className="btn-pill mt-5"
+                  onClick={() => setIsApiKeyDialogOpen(true)}
+                >
+                  Add API key
+                </button>
               </div>
             </motion.div>
           )}
@@ -225,8 +181,12 @@ function App() {
           <motion.div
             className="relative"
             initial={{ opacity: 0 }}
-            animate={{ opacity: 1 }}
+            animate={{
+              opacity: hasApiKey ? 1 : 0.62,
+              filter: hasApiKey ? "blur(0px)" : "blur(2px)",
+            }}
             transition={{ duration: 0.5, delay: 0.2 }}
+            style={{ pointerEvents: hasApiKey ? "auto" : "none" }}
           >
             <Spreadsheet
               data={data}
@@ -234,21 +194,20 @@ function App() {
               setToast={setToastDetail}
               apiKey={apiKey}
               checkApiKey={checkApiKey}
-              isApiKeyDropdownOpen={isApiKeyDropdownOpen}
-              setIsApiKeyDropdownOpen={setIsApiKeyDropdownOpen}
-              setApiKey={(key) => setApiKey(normalizeApiKey(key))}
             />
           </motion.div>
         </div>
       </div>
+
       <a
-        className="ot-sdk-show-settings px-4 py-2 text-sm text-gray-700 hover:text-gray-900 underline"
+        className="ot-sdk-show-settings text-[11px] underline"
         href="#"
         style={{
           position: "fixed",
           bottom: "1rem",
           right: "1rem",
-          zIndex: 50
+          zIndex: 50,
+          color: "var(--color-muted)",
         }}
       >
         Cookie Settings

@@ -11,7 +11,6 @@ import { motion } from "framer-motion";
 import { ToastDetail } from "../App";
 import ExamplePopup from "./ExamplePopup";
 import UnifiedSourcesPanel from "./UnifiedSourcesPanel";
-import ApiKeyInput from "./ApiKeyInput";
 import { Source } from "./Tooltip";
 import { exportToCSV } from "../utils";
 import Papa from "papaparse";
@@ -23,9 +22,6 @@ interface SpreadsheetProps {
   setToast: Dispatch<SetStateAction<ToastDetail>>;
   apiKey: string;
   checkApiKey: () => boolean | 0 | undefined;
-  isApiKeyDropdownOpen: boolean;
-  setIsApiKeyDropdownOpen: (open: boolean) => void;
-  setApiKey: (key: string) => void;
 }
 
 // Add API URL from environment
@@ -37,9 +33,6 @@ const Spreadsheet: React.FC<SpreadsheetProps> = ({
   setData,
   apiKey,
   checkApiKey,
-  isApiKeyDropdownOpen,
-  setIsApiKeyDropdownOpen,
-  setApiKey,
 }) => {
   const [activeCell, setActiveCell] = useState<Position | null>(null);
   const [editValue, setEditValue] = useState("");
@@ -778,7 +771,7 @@ const Spreadsheet: React.FC<SpreadsheetProps> = ({
       {isEnrichingTable && (
         <div className="fixed inset-0 flex items-center justify-center z-50" style={{ background: "rgba(60, 58, 57, 0.6)", backdropFilter: "blur(4px)" }}>
           <motion.div
-            className="glass rounded-[18px] shadow-2xl w-full max-w-5xl mx-4"
+            className="glass rounded-[16px] shadow-2xl w-full max-w-5xl mx-4"
             style={{ 
               background: "rgba(255, 255, 255, 0.95)",
               backdropFilter: "blur(20px)",
@@ -1014,7 +1007,7 @@ const Spreadsheet: React.FC<SpreadsheetProps> = ({
 
       {/* Table at the top */}
       <div 
-        className="w-full mb-6 glass rounded-[14px] sm:rounded-[18px] p-3 sm:p-4" 
+        className="w-full mb-6 glass rounded-[16px] p-3 sm:p-4"
         style={{ 
           opacity: 0.95,
           maxHeight: "calc(100vh - 250px)",
@@ -1033,7 +1026,7 @@ const Spreadsheet: React.FC<SpreadsheetProps> = ({
         }}>
           <table
             ref={tableRef}
-            className="border-separate border-spacing-0 w-full"
+            className="enrich-table border-separate border-spacing-0 w-full"
             style={{ 
               minWidth: "max-content",
               width: "100%"
@@ -1291,33 +1284,17 @@ const Spreadsheet: React.FC<SpreadsheetProps> = ({
         </table>
         </div>
         <div className="mt-2 flex items-center justify-end relative">
-          {/* Enrich button - centered */}
+          {/* Primary action - centered */}
           <div className="absolute left-1/2 transform -translate-x-1/2">
-            <div
-              className="px-3 py-1.5 text-center rounded-md cursor-pointer transition-colors flex items-center gap-2"
-              style={{
-                background: isEnrichingTable ? "var(--color-black-10)" : "var(--color-primary-blue)",
-                color: "white",
-                opacity: isEnrichingTable ? 0.5 : 1,
-                pointerEvents: isEnrichingTable ? "none" : "auto"
-              }}
-              onMouseEnter={(e) => {
-                if (!isEnrichingTable) {
-                  e.currentTarget.style.background = "#8FBCFA";
-                }
-              }}
-              onMouseLeave={(e) => {
-                if (!isEnrichingTable) {
-                  e.currentTarget.style.background = "var(--color-primary-blue)";
-                }
-              }}
+            <button
+              type="button"
+              className="btn-pill"
+              disabled={isEnrichingTable}
               onClick={enrichTable}
             >
-              <Sparkles size={16} />
-              <span className="text-sm font-medium">
-                {isEnrichingTable ? "Enriching..." : "Enrich"}
-              </span>
-            </div>
+              <Sparkles size={15} />
+              <span>{isEnrichingTable ? "Enriching..." : "Enrich table"}</span>
+            </button>
           </div>
           
           <div className="flex items-center gap-2">
@@ -1438,7 +1415,7 @@ const Spreadsheet: React.FC<SpreadsheetProps> = ({
 
         {/* Sources section at the bottom - like research page */}
         {hasSources && (
-          <div className="mt-6 glass rounded-[14px] sm:rounded-[18px] p-3 sm:p-4">
+          <div className="mt-6 glass rounded-[16px] p-3 sm:p-4">
             <div
               className="text-sm font-semibold mb-2 sm:mb-3 flex items-center gap-2"
               style={{ color: "var(--color-black)" }}
@@ -1455,7 +1432,7 @@ const Spreadsheet: React.FC<SpreadsheetProps> = ({
                   href={source.url}
                   target="_blank"
                   rel="noopener noreferrer"
-                  className="block p-2.5 sm:p-3 rounded-[10px] sm:rounded-[12px] transition active:scale-[0.98]"
+                  className="block p-2.5 sm:p-3 rounded-[10px] transition active:scale-[0.98]"
                   style={{
                     background: "var(--color-white)",
                     border: "1px solid var(--color-black-10)",
@@ -1512,7 +1489,7 @@ const Spreadsheet: React.FC<SpreadsheetProps> = ({
 
         {/* Search Queries section at the bottom - like research page */}
         {hasQueries && (
-          <div className="mt-6 glass rounded-[14px] sm:rounded-[18px] p-3 sm:p-4">
+          <div className="mt-6 glass rounded-[16px] p-3 sm:p-4">
             <div
               className="text-sm font-semibold mb-2 sm:mb-3 flex items-center gap-2"
               style={{ color: "var(--color-black)" }}
@@ -1526,7 +1503,7 @@ const Spreadsheet: React.FC<SpreadsheetProps> = ({
               {uniqueQueries.map((query, index) => (
                 <div
                   key={index}
-                  className="flex items-start gap-2 p-2.5 sm:p-3 rounded-[10px] sm:rounded-[12px] transition"
+                  className="flex items-start gap-2 p-2.5 sm:p-3 rounded-[10px] transition"
                   style={{
                     background: "var(--color-white)",
                     border: "1px solid var(--color-black-10)",
