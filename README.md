@@ -2,9 +2,9 @@
 This repository provides a powerful solution for building AI-enriched spreadsheets with real-time web access. The application combines [tavily's](https://tavily.com/) advanced search capabilities with to transform your business spreadsheets with intelligent web-sourced information.
 
 
-### Step 1: Fill in spreadsheet columns
+### Step 1: Connect your Tavily API key and fill in spreadsheet columns
 <div align="center">
-  <img src="images/enrichment1.gif" alt="fill spreadsheet" width="800"/>
+  <img src="images/enrichment1.gif" alt="connect API key and fill spreadsheet" width="800"/>
 </div>
 
 ### Step 2: Enrich your spreadsheet
